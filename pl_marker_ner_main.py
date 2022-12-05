@@ -90,12 +90,12 @@ MODEL_CLASSES = {
 class ACEDatasetNER(Dataset):
     def __init__(self, tokenizer, args=None, evaluate=False, do_test=False):
         if not evaluate:
-            file_path = os.path.join(args.data_dir, args.train_file)
+            file_path = args.train_file
         else:
             if do_test:
-                file_path = os.path.join(args.data_dir, args.test_file)
+                file_path = args.data_file
             else:
-                file_path = os.path.join(args.data_dir, args.dev_file)
+                file_path = args.dev_file
 
         assert os.path.isfile(file_path)
 
@@ -416,16 +416,12 @@ class ACEDatasetNER(Dataset):
 
         return stacked_fields
 
- 
-
 def set_seed(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
-
-
 
 def _rotate_checkpoints(args, checkpoint_prefix, use_mtime=False):
     if not args.save_total_limit:
@@ -457,9 +453,6 @@ def _rotate_checkpoints(args, checkpoint_prefix, use_mtime=False):
 
 def train(args, model, tokenizer):
     """ Train the model """
-    if args.local_rank in [-1, 0]:
-        # tb_writer = SummaryWriter("logs/ace_ner_logs/"+args.output_dir[args.output_dir.rfind('/'):])
-        tb_writer = SummaryWriter("logs/"+args.data_dir[max(args.data_dir.rfind('/'),0):]+"_ner_logs/"+args.output_dir[args.output_dir.rfind('/'):])
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
 
@@ -468,11 +461,7 @@ def train(args, model, tokenizer):
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, num_workers=2*int(args.output_dir.find('test')==-1))
 
-    if args.max_steps > 0:
-        t_total = args.max_steps
-        args.num_train_epochs = args.max_steps // (len(train_dataloader) // args.gradient_accumulation_steps) + 1
-    else:
-        t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
+    t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
 
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ['bias', 'LayerNorm.weight']
@@ -522,20 +511,20 @@ def train(args, model, tokenizer):
     tr_loss, logging_loss = 0.0, 0.0
 
     model.zero_grad()
-    train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
     best_f1 = -1
-
-    for _ in train_iterator:
+    for epoch in range(int(args.num_train_epochs)):
         # if _ > 0 and (args.shuffle or args.group_edge or args.group_sort):  
         #     train_dataset.initialize()
         #     if args.group_edge:
         #         train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
         #         train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, num_workers=2*int(args.output_dir.find('test')==-1))
 
-        epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
+        epoch_iterator = tqdm(train_dataloader, ascii=True)
+        epoch_iterator.set_description(f"Epoch {epoch+1}/{int(args.num_train_epochs)}")
         for step, batch in enumerate(epoch_iterator):
-
+            
+            #batch = next(iter(train_dataloader))
             model.train()
             batch = tuple(t.to(args.device) for t in batch)
 
@@ -579,53 +568,27 @@ def train(args, model, tokenizer):
                 model.zero_grad()
                 global_step += 1
 
-                if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
-                    # Log metrics
-                    tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
-                    tb_writer.add_scalar('loss', (tr_loss - logging_loss)/args.logging_steps, global_step)
-                    logging_loss = tr_loss
+            epoch_iterator.set_postfix({'train_loss': tr_loss})
 
+        # Save model checkpoint
+        if args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
+            results = evaluate(args, model, tokenizer)
+            f1 = results['f1']
 
-                if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
-                    update = True
-                    # Save model checkpoint
-                    if args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
-                        results = evaluate(args, model, tokenizer)
-                        f1 = results['f1']
-                        tb_writer.add_scalar('f1', f1, global_step)
+            if f1 > best_f1:
+                best_f1 = f1
+                print ('Best F1', best_f1)
+                output_dir = os.path.join(args.output_dir, 'best_model', 'ner_model')
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                model_to_save = model.module if hasattr(model, 'module') else model  # Take care of distributed/parallel training
+                model_to_save.save_pretrained(output_dir)
+                tokenizer.save_pretrained(output_dir)
+                logger.info("Saving model checkpoint to %s", output_dir)
 
-                        if f1 > best_f1:
-                            best_f1 = f1
-                            print ('Best F1', best_f1)
-                        else:
-                            update = False
-
-                    if update:
-                        checkpoint_prefix = 'checkpoint'
-                        output_dir = os.path.join(args.output_dir, '{}-{}'.format(checkpoint_prefix, global_step))
-                        if not os.path.exists(output_dir):
-                            os.makedirs(output_dir)
-                        model_to_save = model.module if hasattr(model, 'module') else model  # Take care of distributed/parallel training
-                        model_to_save.save_pretrained(output_dir)
-
-                        torch.save(args, os.path.join(output_dir, 'training_args.bin'))
-                        logger.info("Saving model checkpoint to %s", output_dir)
-
-                        _rotate_checkpoints(args, checkpoint_prefix)
-
-            if args.max_steps > 0 and global_step > args.max_steps:
-                epoch_iterator.close()
-                break
-        if args.max_steps > 0 and global_step > args.max_steps:
-            train_iterator.close()
-            break
-
-    if args.local_rank in [-1, 0]:
-        tb_writer.close()
 
 
     return global_step, tr_loss / global_step, best_f1
-
 
 def evaluate(args, model, tokenizer, prefix="", do_test=False):
 
@@ -657,8 +620,9 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
     model.eval()
 
     start_time = timeit.default_timer() 
-
-    for batch in tqdm(eval_dataloader, desc="Evaluating"):
+    eval_iterator = tqdm(eval_dataloader, ascii=True)
+    eval_iterator.set_description(f"Evaluate")
+    for step, batch in enumerate(eval_iterator):
         indexs = batch[-2]
         batch_m2s = batch[-1]
 
@@ -679,8 +643,9 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
             outputs = model(**inputs)
 
             ner_logits = outputs[0]
-            ner_logits = torch.nn.functional.softmax(ner_logits, dim=-1)
-            ner_values, ner_preds = torch.max(ner_logits, dim=-1)
+            ner_probs = torch.nn.functional.softmax(ner_logits, dim=-1)
+            ner_probs, ner_preds = torch.max(ner_probs, dim=-1)
+            ner_logits, _ = torch.max(ner_logits, dim=-1)
 
             for i in range(len(indexs)):
                 index = indexs[i]
@@ -689,7 +654,7 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
                     obj = m2s[j]
                     ner_label = eval_dataset.ner_label_list[ner_preds[i,j]]
                     if ner_label!='NIL':
-                        scores[(index[0], index[1])][(obj[0], obj[1])] = (float(ner_values[i,j]), ner_label)
+                        scores[(index[0], index[1])][(obj[0], obj[1])] = (float(ner_logits[i,j]), float(ner_probs[i,j]), ner_label)
 
     cor = 0 
     tot_pred = 0
@@ -699,11 +664,11 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
     for example_index, pair_dict in scores.items():  
 
         sentence_results = []
-        for k1, (v2_score, v2_ner_label) in pair_dict.items():
+        for k1, (v2_logit, v2_prob, v2_ner_label) in pair_dict.items():
             if v2_ner_label!='NIL':
-                sentence_results.append((v2_score, k1, v2_ner_label))
+                sentence_results.append((v2_logit, v2_prob, k1, v2_ner_label))
 
-        sentence_results.sort(key=lambda x: -x[0])
+        sentence_results.sort(key=lambda x: -x[1])
         no_overlap = []
         def is_overlap(m1, m2):
             if m2[0]<=m1[0] and m1[0]<=m2[1]:
@@ -713,34 +678,35 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
             return False
 
         for item in sentence_results:
-            m2 = item[1]
+            m2 = item[2]
             overlap = False
             for x in no_overlap:
-                _m2 = x[1]
+                _m2 = x[2]
                 if (is_overlap(m2, _m2)):
                     if args.data_dir.find('ontonotes')!=-1:
                         overlap = True
                         break
                     else:
                     
-                        if item[2]==x[2]:
+                        if item[3]==x[3]:
                             overlap = True
                             break
 
             if not overlap:
                 no_overlap.append(item)
 
-            pred_ner_label = item[2]
+            pred_ner_label = item[3]
             tot_pred_tot += 1
             if (example_index, m2, pred_ner_label) in ner_golden_labels:
                 cor_tot += 1
 
         for item in no_overlap:
-            m2 = item[1]
-            pred_ner_label = item[2]
+            m2 = item[2]
+            pred_ner_label = item[3]
+            logit = item[0]; prob = item[1]
             tot_pred += 1
             if args.output_results:
-                predict_ners[example_index].append( (m2[0], m2[1], pred_ner_label) )
+                predict_ners[example_index].append( (logit, prob, m2[0], m2[1], pred_ner_label))
             if (example_index, m2, pred_ner_label) in ner_golden_labels:
                 cor += 1        
 
@@ -774,7 +740,7 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
             predicted_ner = []
             for n in range(num_sents):
                 item = predict_ners.get((l_idx, n), [])
-                item.sort()
+                item.sort(key = lambda x: x[1])
                 predicted_ner.append( item )
 
             data['predicted_ner'] = predicted_ner
@@ -783,10 +749,11 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
     return results
 
 
-def main():
+def call_pl_marker_ner(importargs=None):
     parser = argparse.ArgumentParser()
 
     ## Required parameters
+    parser.add_argument("--device_id", default=0, type=int, required=True, help="Device Id for GPU")
     parser.add_argument("--data_dir", default='ace_data', type=str, required=True,
                         help="The input data dir. Should contain the .tsv files (or other data files) for the task.")
     parser.add_argument("--model_type", default=None, type=str, required=True,
@@ -834,15 +801,11 @@ def main():
                         help="Max gradient norm.")
     parser.add_argument("--num_train_epochs", default=3.0, type=float,
                         help="Total number of training epochs to perform.")
-    parser.add_argument("--max_steps", default=-1, type=int,
-                        help="If > 0: set total number of training steps to perform. Override num_train_epochs.")
     parser.add_argument("--warmup_steps", default=-1, type=int,
                         help="Linear warmup over warmup_steps.")
 
     parser.add_argument('--logging_steps', type=int, default=5,
                         help="Log every X updates steps.")
-    parser.add_argument('--save_steps', type=int, default=1000,
-                        help="Save checkpoint every X updates steps.")
     parser.add_argument("--eval_all_checkpoints", action='store_true',
                         help="Evaluate all checkpoints starting with the same prefix as model_name ending and ending with step number")
     parser.add_argument("--no_cuda", action='store_true',
@@ -869,7 +832,7 @@ def main():
 
     parser.add_argument("--train_file",  default="train.json", type=str)
     parser.add_argument("--dev_file",  default="dev.json", type=str)
-    parser.add_argument("--test_file",  default="test.json", type=str)
+    parser.add_argument("--data_file",  default="test.json", type=str)
 
     parser.add_argument('--alpha', type=float, default=1,  help="")
     parser.add_argument('--max_pair_length', type=int, default=256,  help="")
@@ -885,36 +848,20 @@ def main():
     parser.add_argument('--group_axis', type=int, default=-1,  help="")
     parser.add_argument('--group_sort', action='store_true')
 
+    ll = []
+    for key,val in importargs.items():
+        if isinstance(val,bool):
+            if val==True:
+                ll.extend(['--'+key])
+        elif isinstance(val,int) or isinstance(val,float):
+            ll.extend(['--'+key,str(val)])
+        else:
+            ll.extend(['--'+key,val])
 
-    args = parser.parse_args()
-
-    if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
-        raise ValueError("Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(args.output_dir))
-
-    def create_exp_dir(path, scripts_to_save=None):
-        if args.output_dir.endswith("test"):
-            return
-        if not os.path.exists(path):
-            os.mkdir(path)
-
-        print('Experiment dir : {}'.format(path))
-        if scripts_to_save is not None:
-            if not os.path.exists(os.path.join(path, 'scripts')):
-                os.mkdir(os.path.join(path, 'scripts'))
-            for script in scripts_to_save:
-                dst_file = os.path.join(path, 'scripts', os.path.basename(script))
-                shutil.copyfile(script, dst_file)
-
-    if args.do_train and args.local_rank in [-1, 0] and args.output_dir.find('test')==-1:
-        create_exp_dir(args.output_dir, scripts_to_save=['run_acener.py', 'transformers/src/transformers/modeling_bert.py',  'transformers/src/transformers/modeling_albert.py'])
-
-    # Setup distant debugging if needed
-    if args.server_ip and args.server_port:
-        # Distant debugging - see https://code.visualstudio.com/docs/python/debugging#_attach-to-a-local-script
-        import ptvsd
-        print("Waiting for debugger attach")
-        ptvsd.enable_attach(address=(args.server_ip, args.server_port), redirect_output=True)
-        ptvsd.wait_for_attach()
+    args = parser.parse_known_args(ll)[0]
+             
+    os.environ['CUDA_DEVICE_ORDER']='PCI_BUS_ID'
+    os.environ['CUDA_VISIBLE_DEVICES']=str(args.device_id)
 
     # Setup CUDA, GPU & distributed training
     if args.local_rank == -1 or args.no_cuda:
@@ -1012,68 +959,23 @@ def main():
         global_step, tr_loss, best_f1 = train(args, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
-    if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        # Create output directory if needed
-        if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
-            os.makedirs(args.output_dir)
-        update = True
-        if args.evaluate_during_training:
-            results = evaluate(args, model, tokenizer)
-            f1 = results['f1']
-            if f1 > best_f1:
-                best_f1 = f1
-                print ('Best F1', best_f1)
-            else:
-                update = False
-
-        if update:
-            checkpoint_prefix = 'checkpoint'
-            output_dir = os.path.join(args.output_dir, '{}-{}'.format(checkpoint_prefix, global_step))
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-            model_to_save = model.module if hasattr(model, 'module') else model  # Take care of distributed/parallel training
-
-            model_to_save.save_pretrained(output_dir)
-
-            torch.save(args, os.path.join(output_dir, 'training_args.bin'))
-            logger.info("Saving model checkpoint to %s", output_dir)
-            _rotate_checkpoints(args, checkpoint_prefix)
-
-        tokenizer.save_pretrained(args.output_dir)
-
-        torch.save(args, os.path.join(args.output_dir, 'training_args.bin'))
-
 
     # Evaluation
     results = {'dev_best_f1': best_f1}
-    if args.do_eval and args.local_rank in [-1, 0]:
-        checkpoints = [args.output_dir]
-
-
-        WEIGHTS_NAME = 'pytorch_model.bin'
-
-        if args.eval_all_checkpoints:
-            checkpoints = list(os.path.dirname(c) for c in sorted(glob.glob(args.output_dir + '/**/' + WEIGHTS_NAME, recursive=True)))
-
+    if not args.no_test:
         logger.info("Evaluate on test set")
 
-        logger.info("Evaluate the following checkpoints: %s", checkpoints)
-        for checkpoint in checkpoints:
-            global_step = checkpoint.split('-')[-1] if len(checkpoints) > 1 else ""
+        model = model_class.from_pretrained(args.model_name_or_path, config=config)
 
+        model.to(args.device)
+        result = evaluate(args, model, tokenizer, do_test=not args.no_test)
 
-            model = model_class.from_pretrained(checkpoint, config=config)
+        result = dict((k, v) for k, v in result.items())
+        results.update(result)
 
-            model.to(args.device)
-            result = evaluate(args, model, tokenizer, prefix=global_step, do_test=not args.no_test)
-
-            result = dict((k + '_{}'.format(global_step), v) for k, v in result.items())
-            results.update(result)
-
-    if args.local_rank in [-1, 0]:
-        output_eval_file = os.path.join(args.output_dir, "results.json")
-        json.dump(results, open(output_eval_file, "w"))
-        logger.info("Result: %s", json.dumps(results))
+        # output_eval_file = os.path.join(args.output_dir, "ner_results.json")
+        # json.dump(results, open(output_eval_file, "w"))
+        logger.info("NER Result: %s", json.dumps(results))
 
 if __name__ == "__main__":
-    main()
+    call_pl_marker_ner()

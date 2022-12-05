@@ -25,13 +25,12 @@ import random
 from collections import defaultdict
 import re
 import shutil
-
+import csv
 import numpy as np
 import torch
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
 from torch.utils.data.distributed import DistributedSampler
-from tensorboardX import SummaryWriter
 from tqdm import tqdm, trange
 import time
 from transformers import (WEIGHTS_NAME, BertConfig,
@@ -60,7 +59,7 @@ import timeit
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
-
+CSV_DELIMETER = ';'
 
 ALL_MODELS = sum((tuple(conf.pretrained_config_archive_map.keys()) for conf in (BertConfig,  AlbertConfig)), ())
 
@@ -91,15 +90,9 @@ class ACEDataset(Dataset):
             file_path = os.path.join(args.data_dir, args.train_file)
         else:
             if do_test:
-                if args.test_file.find('models')==-1:
-                    file_path = os.path.join(args.data_dir, args.test_file)
-                else:
-                    file_path = args.test_file
+                file_path = args.data_file
             else:
-                if args.dev_file.find('models')==-1:
-                    file_path = os.path.join(args.data_dir, args.dev_file)
-                else:
-                    file_path = args.dev_file
+                file_path = args.dev_file
 
         assert os.path.isfile(file_path)
 
@@ -283,76 +276,151 @@ class ACEDataset(Dataset):
                 if not self.evaluate:
                     entities.append((10000, 10000, 'NIL')) # only for NER
 
-                for sub in entities:    
-                    cur_ins = []
+                if not self.evaluate:
+                    for sub in entities:    
+                        cur_ins = []
 
-                    if sub[0] < 10000:
-                        sub_s = token2subword[sub[0]] - doc_offset + 1
-                        sub_e = token2subword[sub[1]+1] - doc_offset
-                        sub_label = ner_label_map[sub[2]]
+                        if sub[0] < 10000:
+                            sub_s = token2subword[sub[0]] - doc_offset + 1
+                            sub_e = token2subword[sub[1]+1] - doc_offset
+                            sub_label = ner_label_map[sub[2]]
 
-                        if self.use_typemarker:
-                            l_m = '[unused%d]' % ( 2 + sub_label )
-                            r_m = '[unused%d]' % ( 2 + sub_label + len(self.ner_label_list) )
+                            if self.use_typemarker:
+                                l_m = '[unused%d]' % ( 2 + sub_label )
+                                r_m = '[unused%d]' % ( 2 + sub_label + len(self.ner_label_list) )
+                            else:
+                                l_m = '[unused0]'
+                                r_m = '[unused1]'
+                            
+                            sub_tokens = target_tokens[:sub_s] + [l_m] + target_tokens[sub_s:sub_e+1] + [r_m] + target_tokens[sub_e+1: ]
+                            sub_e += 2
                         else:
-                            l_m = '[unused0]'
-                            r_m = '[unused1]'
-                        
-                        sub_tokens = target_tokens[:sub_s] + [l_m] + target_tokens[sub_s:sub_e+1] + [r_m] + target_tokens[sub_e+1: ]
-                        sub_e += 2
-                    else:
-                        sub_s = len(target_tokens)
-                        sub_e = len(target_tokens)+1
-                        sub_tokens = target_tokens + ['[unused0]',  '[unused1]']
-                        sub_label = -1
+                            sub_s = len(target_tokens)
+                            sub_e = len(target_tokens)+1
+                            sub_tokens = target_tokens + ['[unused0]',  '[unused1]']
+                            sub_label = -1
 
-                    if sub_e >= self.max_seq_length-1:
-                        continue
-                    # assert(sub_e < self.max_seq_length)
-                    for start, end, obj_label in sentence_ners:
-                        if self.model_type.endswith('nersub'):
-                            if start==sub[0] and end==sub[1]:
+                        if sub_e >= self.max_seq_length-1:
+                            continue
+                        # assert(sub_e < self.max_seq_length)
+                        for start, end, obj_label in sentence_ners:
+                            if self.model_type.endswith('nersub'):
+                                if start==sub[0] and end==sub[1]:
+                                    continue
+
+                            doc_entity_start = token2subword[start]
+                            doc_entity_end = token2subword[end+1]
+                            left = doc_entity_start - doc_offset + 1
+                            right = doc_entity_end - doc_offset
+
+                            obj = (start, end)
+                            if obj[0] >= sub[0]:
+                                left += 1
+                                if obj[0] > sub[1]:
+                                    left += 1
+
+                            if obj[1] >= sub[0]:   
+                                right += 1
+                                if obj[1] > sub[1]:
+                                    right += 1
+        
+                            label = pos2label.get((sub[0], sub[1], obj[0], obj[1]), 0)
+
+                            if right >= self.max_seq_length-1:
                                 continue
 
-                        doc_entity_start = token2subword[start]
-                        doc_entity_end = token2subword[end+1]
-                        left = doc_entity_start - doc_offset + 1
-                        right = doc_entity_end - doc_offset
+                            cur_ins.append(((left, right, ner_label_map[obj_label]), label, obj))
 
-                        obj = (start, end)
-                        if obj[0] >= sub[0]:
-                            left += 1
-                            if obj[0] > sub[1]:
-                                left += 1
 
-                        if obj[1] >= sub[0]:   
-                            right += 1
-                            if obj[1] > sub[1]:
-                                right += 1
-    
-                        label = pos2label.get((sub[0], sub[1], obj[0], obj[1]), 0)
+                        maxR = max(maxR, len(cur_ins))
+                        dL = self.max_pair_length
+                        if self.args.shuffle:
+                            np.random.shuffle(cur_ins)
 
-                        if right >= self.max_seq_length-1:
+                        for i in range(0, len(cur_ins), dL):
+                            examples = cur_ins[i : i + dL]
+                            item = {
+                                'index': (l_idx, n),
+                                'sentence': sub_tokens,
+                                'examples': examples,
+                                'sub': (sub, (sub_s, sub_e), sub_label), #(sub[0], sub[1], sub_label),
+                            }                
+                            
+                            self.data.append(item)
+                else:
+                    for sub in entities:    
+                        cur_ins = []
+
+                        if sub[2] < 10000:
+                            sub_s = token2subword[sub[2]] - doc_offset + 1
+                            sub_e = token2subword[sub[3]+1] - doc_offset
+                            sub_label = ner_label_map[sub[4]]
+
+                            if self.use_typemarker:
+                                l_m = '[unused%d]' % ( 2 + sub_label )
+                                r_m = '[unused%d]' % ( 2 + sub_label + len(self.ner_label_list) )
+                            else:
+                                l_m = '[unused0]'
+                                r_m = '[unused1]'
+                            
+                            sub_tokens = target_tokens[:sub_s] + [l_m] + target_tokens[sub_s:sub_e+1] + [r_m] + target_tokens[sub_e+1: ]
+                            sub_e += 2
+                        else:
+                            sub_s = len(target_tokens)
+                            sub_e = len(target_tokens)+1
+                            sub_tokens = target_tokens + ['[unused0]',  '[unused1]']
+                            sub_label = -1
+
+                        if sub_e >= self.max_seq_length-1:
                             continue
+                        # assert(sub_e < self.max_seq_length)
+                        for logit, prob, start, end, obj_label in sentence_ners:
+                            if self.model_type.endswith('nersub'):
+                                if start==sub[2] and end==sub[3]:
+                                    continue
 
-                        cur_ins.append(((left, right, ner_label_map[obj_label]), label, obj))
+                            doc_entity_start = token2subword[start]
+                            doc_entity_end = token2subword[end+1]
+                            left = doc_entity_start - doc_offset + 1
+                            right = doc_entity_end - doc_offset
+
+                            obj = (start, end)
+                            if obj[0] >= sub[2]:
+                                left += 1
+                                if obj[0] > sub[3]:
+                                    left += 1
+
+                            if obj[1] >= sub[2]:   
+                                right += 1
+                                if obj[1] > sub[3]:
+                                    right += 1
+        
+                            label = pos2label.get((sub[2], sub[3], obj[0], obj[1]), 0)
+
+                            if right >= self.max_seq_length-1:
+                                continue
+
+                            cur_ins.append(((left, right, ner_label_map[obj_label]), label, obj))
 
 
-                    maxR = max(maxR, len(cur_ins))
-                    dL = self.max_pair_length
-                    if self.args.shuffle:
-                        np.random.shuffle(cur_ins)
+                        maxR = max(maxR, len(cur_ins))
+                        dL = self.max_pair_length
+                        if self.args.shuffle:
+                            np.random.shuffle(cur_ins)
 
-                    for i in range(0, len(cur_ins), dL):
-                        examples = cur_ins[i : i + dL]
-                        item = {
-                            'index': (l_idx, n),
-                            'sentence': sub_tokens,
-                            'examples': examples,
-                            'sub': (sub, (sub_s, sub_e), sub_label), #(sub[0], sub[1], sub_label),
-                        }                
-                        
-                        self.data.append(item)                    
+                        for i in range(0, len(cur_ins), dL):
+                            examples = cur_ins[i : i + dL]
+                            item = {
+                                'index': (l_idx, n),
+                                'sentence': sub_tokens,
+                                'examples': examples,
+                                'sub': (sub, (sub_s, sub_e), sub_label), #(sub[0], sub[1], sub_label),
+                            }                
+                            
+                            self.data.append(item)                    
+        
+        
+        
         logger.info('maxR: %s', maxR)
         logger.info('maxL: %s', maxL)
                 
@@ -454,17 +522,12 @@ class ACEDataset(Dataset):
 
         return stacked_fields
 
- 
-
-
 def set_seed(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
-
-
 
 def _rotate_checkpoints(args, checkpoint_prefix, use_mtime=False):
     if not args.save_total_limit:
@@ -496,9 +559,6 @@ def _rotate_checkpoints(args, checkpoint_prefix, use_mtime=False):
 
 def train(args, model, tokenizer):
     """ Train the model """
-    if args.local_rank in [-1, 0]:
-        tb_writer = SummaryWriter("logs/"+args.data_dir[max(args.data_dir.rfind('/'),0):]+"_re_logs/"+args.output_dir[args.output_dir.rfind('/'):])
-
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
 
     train_dataset = ACEDataset(tokenizer=tokenizer, args=args, max_pair_length=args.max_pair_length)
@@ -562,16 +622,18 @@ def train(args, model, tokenizer):
     tr_re_loss, logging_re_loss = 0.0, 0.0
 
     model.zero_grad()
-    train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
-    best_f1 = -1
+    best_f1_with_ner = -1; best_f1 = -1
 
-
-
-    for _ in train_iterator:
+    with open(os.path.join(args.output_dir,'F1_epochs.csv'),'w',newline='') as csv_file:
+        header_row = ['{:<10}'.format('Epoch'),'{:<30}'.format('NER_Micro_F1'), '{:<30}'.format('Rel+_Valid_Micro_F1'), '{:<30}'.format('Best_Rel+_Valid_Micro_F1'), '{:<30}'.format('Rel_Valid_Micro_F1'), '{:<30}'.format('Best_Rel_Valid_Micro_F1')]
+        writer = csv.writer(csv_file,delimiter=CSV_DELIMETER); writer.writerow(header_row)
+    
+    for epoch in range(int(args.num_train_epochs)):
         if args.shuffle and _ > 0:
             train_dataset.initialize()
-        epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
+        epoch_iterator = tqdm(train_dataloader, ascii=True)
+        epoch_iterator.set_description(f"Epoch {epoch+1}/{int(args.num_train_epochs)}")
         for step, batch in enumerate(epoch_iterator):
 
             model.train()
@@ -628,62 +690,36 @@ def train(args, model, tokenizer):
                 model.zero_grad()
                 global_step += 1
 
-                # if args.model_type.endswith('rel') :
-                #     ori_model.bert.encoder.layer[args.add_coref_layer].attention.self.relative_attention_bias.weight.data[0].zero_() # 可以手动乘个mask
+            epoch_iterator.set_postfix({'train_loss': tr_loss})
 
-                if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
-                    # Log metrics
-                    tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
-                    tb_writer.add_scalar('loss', (tr_loss - logging_loss)/args.logging_steps, global_step)
-                    logging_loss = tr_loss
+        # Save model checkpoint
+        if args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
+            results = evaluate(args, model, tokenizer, prefix='eval')
+            f1_with_ner = results['rel_f1_with_ner']; f1 = results['rel_f1']; ner_f1 = results['ner_f1']
 
-                    tb_writer.add_scalar('RE_loss', (tr_re_loss - logging_re_loss)/args.logging_steps, global_step)
-                    logging_re_loss = tr_re_loss
+            if f1_with_ner > best_f1_with_ner:
+                best_f1_with_ner = f1_with_ner
+                print ('Best F1 with NER', best_f1_with_ner)
 
-                    tb_writer.add_scalar('NER_loss', (tr_ner_loss - logging_ner_loss)/args.logging_steps, global_step)
-                    logging_ner_loss = tr_ner_loss
+                output_dir = os.path.join(args.output_dir, 'best_model')
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                model_to_save = model.module if hasattr(model, 'module') else model  # Take care of distributed/parallel training
 
+                model_to_save.save_pretrained(output_dir)
+                tokenizer.save_pretrained(output_dir)
 
-                if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0: # valid for bert/spanbert
-                    update = True
-                    # Save model checkpoint
-                    if args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
-                        results = evaluate(args, model, tokenizer)
-                        f1 = results['f1_with_ner']
-                        tb_writer.add_scalar('f1_with_ner', f1, global_step)
-
-                        if f1 > best_f1:
-                            best_f1 = f1
-                            print ('Best F1', best_f1)
-                        else:
-                            update = False
-
-                    if update:
-                        checkpoint_prefix = 'checkpoint'
-                        output_dir = os.path.join(args.output_dir, '{}-{}'.format(checkpoint_prefix, global_step))
-                        if not os.path.exists(output_dir):
-                            os.makedirs(output_dir)
-                        model_to_save = model.module if hasattr(model, 'module') else model  # Take care of distributed/parallel training
-
-                        model_to_save.save_pretrained(output_dir)
-
-                        torch.save(args, os.path.join(output_dir, 'training_args.bin'))
-                        logger.info("Saving model checkpoint to %s", output_dir)
-
-                        _rotate_checkpoints(args, checkpoint_prefix)
-
-            if args.max_steps > 0 and global_step > args.max_steps:
-                epoch_iterator.close()
-                break
-        if args.max_steps > 0 and global_step > args.max_steps:
-            train_iterator.close()
-            break
-
-    if args.local_rank in [-1, 0]:
-        tb_writer.close()
+                logger.info("Saving model checkpoint to %s", output_dir)
+    
+            if f1 > best_f1:
+                best_f1 = f1
 
 
-    return global_step, tr_loss / global_step, best_f1
+        with open(os.path.join(args.output_dir,'F1_epochs.csv'),'a') as csv_file:
+            row = ['{:<10}'.format(f'{epoch+1}/'+str(int(args.num_train_epochs))),'{:<30}'.format(f'{ner_f1:.4f}'), '{:<30}'.format(f'{f1:.4f}'), '{:<30}'.format(f'{best_f1:.4f}'), '{:<30}'.format(f'{f1_with_ner:.4f}'), '{:<30}'.format(f'{best_f1_with_ner:.4f}')]
+            writer = csv.writer(csv_file,delimiter=CSV_DELIMETER); writer.writerow(row)
+    
+    return global_step, tr_loss / global_step, best_f1_with_ner
 
 def to_list(tensor):
     return tensor.detach().cpu().tolist()
@@ -722,8 +758,9 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
     logger.info("  Num examples = %d", len(eval_dataset))
 
     start_time = timeit.default_timer() 
-
-    for batch in tqdm(eval_dataloader, desc="Evaluating"):
+    eval_iterator = tqdm(eval_dataloader, ascii=True)
+    eval_iterator.set_description(f"Evaluate")
+    for step, batch in enumerate(eval_iterator):
         indexs = batch[-3]
         subs = batch[-2]
         batch_m2s = batch[-1]
@@ -748,26 +785,27 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
             logits = outputs[0]
 
             if args.eval_logsoftmax:  # perform a bit better
-                logits = torch.nn.functional.log_softmax(logits, dim=-1)
+                probs = torch.nn.functional.log_softmax(logits, dim=-1)
 
             elif args.eval_softmax:
-                logits = torch.nn.functional.softmax(logits, dim=-1)
+                probs = torch.nn.functional.softmax(logits, dim=-1)
 
             if args.use_ner_results or args.model_type.endswith('nonersub'):                 
                 ner_preds = ner_labels
             else:
                 ner_preds = torch.argmax(outputs[1], dim=-1)
             logits = logits.cpu().numpy()
+            probs = probs.cpu().numpy()
             ner_preds = ner_preds.cpu().numpy()
             for i in range(len(indexs)):
                 index = indexs[i]
                 sub = subs[i]
                 m2s = batch_m2s[i]
-                example_subs.add(((index[0], index[1]), (sub[0], sub[1])))
+                example_subs.add(((index[0], index[1]), (sub[2], sub[3])))
                 for j in range(len(m2s)):
                     obj = m2s[j]
                     ner_label = eval_dataset.ner_label_list[ner_preds[i,j]]
-                    scores[(index[0], index[1])][( (sub[0], sub[1]), (obj[0], obj[1]))] = (logits[i, j].tolist(), ner_label)
+                    scores[(index[0], index[1])][( (sub[2], sub[3]), (obj[0], obj[1]))] = (logits[i, j].tolist(),probs[i, j].tolist(),ner_label)
             
     cor = 0 
     tot_pred = 0
@@ -780,10 +818,11 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
     tot_output_results = defaultdict(list)
     if not args.eval_unidirect:     # eval_unidrect is for ablation study
         # print (len(scores))
-        for example_index, pair_dict in sorted(scores.items(), key=lambda x:x[0]):  
+        for ii, (example_index, pair_dict) in sorted(enumerate(scores.items()), key=lambda x:x[1][0]):
+
             visited  = set([])
             sentence_results = []
-            for k1, (v1, v2_ner_label) in pair_dict.items():
+            for k1, (v1_logit,v1_prob,v2_ner_label) in pair_dict.items():
                 
                 if k1 in visited:
                     continue
@@ -791,7 +830,8 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
 
                 if v2_ner_label=='NIL':
                     continue
-                v1 = list(v1)
+                v1_logit = list(v1_logit)
+                v1_prob = list(v1_prob)
                 m1 = k1[0]
                 m2 = k1[1]
                 if m1 == m2:
@@ -800,29 +840,33 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
                 v2s = pair_dict.get(k2, None)
                 if v2s is not None:
                     visited.add(k2)
-                    v2, v1_ner_label = v2s
-                    v2 = v2[ : len(sym_labels)] + v2[num_label:] + v2[len(sym_labels) : num_label]
+                    v2_logit, v2_prob, v1_ner_label = v2s
+                    v2_prob = v2_prob[ : len(sym_labels)] + v2_prob[num_label:] + v2_prob[len(sym_labels) : num_label]
+                    v2_logit = v2_logit[ : len(sym_labels)] + v2_logit[num_label:] + v2_logit[len(sym_labels) : num_label]
 
-                    for j in range(len(v2)):
-                        v1[j] += v2[j]
+                    for j in range(len(v2_prob)):
+                        v1_prob[j] += v2_prob[j]
+                        v1_logit[j] += v1_logit[j]
                 else:
                     assert ( False )
 
                 if v1_ner_label=='NIL':
                     continue
 
-                pred_label = np.argmax(v1)
+                pred_label = int(np.argmax(v1_prob))
                 if pred_label>0:
                     if pred_label >= num_label:
                         pred_label = pred_label - num_label + len(sym_labels)
                         m1, m2 = m2, m1
                         v1_ner_label, v2_ner_label = v2_ner_label, v1_ner_label
 
-                    pred_score = v1[pred_label]
+                    pred_prob = v1_prob[pred_label]
+                    pred_logit = v1_logit[pred_label]
+                    pred_label = label_list[pred_label]
 
-                    sentence_results.append( (pred_score, m1, m2, pred_label, v1_ner_label, v2_ner_label) )
+                    sentence_results.append((pred_logit, pred_prob, m1, m2, pred_label, v1_ner_label, v2_ner_label) )
 
-            sentence_results.sort(key=lambda x: -x[0])
+            sentence_results.sort(key=lambda x: -x[1])
             no_overlap = []
             def is_overlap(m1, m2):
                 if m2[0]<=m1[0] and m1[0]<=m2[1]:
@@ -834,19 +878,16 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
             output_preds = []
 
             for item in sentence_results:
-                m1 = item[1]
-                m2 = item[2]
+                m1 = item[2]
+                m2 = item[3]
                 overlap = False
                 for x in no_overlap:
-                    _m1 = x[1]
-                    _m2 = x[2]
+                    _m1 = x[2]
+                    _m2 = x[3]
                     # same relation type & overlap subject & overlap object --> delete
-                    if item[3]==x[3] and (is_overlap(m1, _m1) and is_overlap(m2, _m2)):
+                    if item[4]==x[4] and (is_overlap(m1, _m1) and is_overlap(m2, _m2)):
                         overlap = True
                         break
-
-                pred_label = label_list[item[3]]
-
 
                 if not overlap:
                     no_overlap.append(item)
@@ -854,9 +895,9 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
             pos2ner = {}
 
             for item in no_overlap:
-                m1 = item[1]
-                m2 = item[2]
-                pred_label = label_list[item[3]]
+                m1 = item[2]
+                m2 = item[3]
+                pred_label = item[4]
                 tot_pred += 1
                 if pred_label in sym_labels:
                     tot_pred += 1 # duplicate
@@ -867,11 +908,11 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
                         cor += 1        
 
                 if m1 not in pos2ner:
-                    pos2ner[m1] = item[4]
+                    pos2ner[m1] = item[5]
                 if m2 not in pos2ner:
-                    pos2ner[m2] = item[5]
+                    pos2ner[m2] = item[6]
 
-                output_preds.append((m1, m2, pred_label))
+                output_preds.append(item)
                 if pred_label in sym_labels:
                     if (example_index, (m1[0], m1[1], pos2ner[m1]), (m2[0], m2[1], pos2ner[m2]), pred_label) in golden_labels_withner  \
                             or (example_index,  (m2[0], m2[1], pos2ner[m2]), (m1[0], m1[1], pos2ner[m1]), pred_label) in golden_labels_withner:
@@ -887,7 +928,7 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
             # refine NER results
             ner_results = list(global_predicted_ners[example_index])
             for i in range(len(ner_results)):
-                start, end, label = ner_results[i] 
+                logit, prob, start, end, label = ner_results[i] 
                 if (example_index, (start, end), label) in ner_golden_labels:
                     ner_ori_cor += 1
                 if (start, end) in pos2ner:
@@ -992,9 +1033,20 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
     logger.info("  Evaluation done in total %f secs (%f example per second)", evalTime,  len(global_predicted_ners) / evalTime)
 
     if do_test:
-        output_w = open(os.path.join(args.output_dir, 'pred_results.json'), 'w')
-        json.dump(tot_output_results, output_w)
+        f_original = open(args.data_file,'r')
+        with open(os.path.join(args.output_dir, args.data_label+'_predictions.json'), 'w') as output_w:
+            for l_idx, line in enumerate(f_original):
+                data = json.loads(line)
+                data['ner'] = data['predicted_ner']; del data['predicted_ner']
+                rels = []
+                for i in range(len(data['sentences'])):
+                    temp = [item[1] for item in tot_output_results[l_idx] if item[0] == i]
+                    temp = temp[0] if temp else temp #if not empty, remove outer list
+                    rels.append(temp)
+                data['relations'] = rels
+                output_w.write(json.dumps(data)+'\n')
 
+            
     ner_p = ner_cor / ner_tot_pred if ner_tot_pred > 0 else 0 
     ner_r = ner_cor / len(ner_golden_labels) 
     ner_f1 = 2 * (ner_p * ner_r) / (ner_p + ner_r) if ner_cor > 0 else 0.0
@@ -1009,18 +1061,18 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
     assert(tot_recall==len(golden_labels_withner))
     f1_with_ner = 2 * (p_with_ner * r_with_ner) / (p_with_ner + r_with_ner) if cor_with_ner > 0 else 0.0
 
-    results = {'f1':  f1,  'f1_with_ner': f1_with_ner, 'ner_f1': ner_f1}
-
+    results = {'ner_f1': ner_f1, 'rel_f1':  f1,  'rel_f1_with_ner': f1_with_ner}
     logger.info("Result: %s", json.dumps(results))
 
     return results
 
 
 
-def main():
+def call_pl_marker_re(importargs=None):
     parser = argparse.ArgumentParser()
 
     ## Required parameters
+    parser.add_argument("--device_id", default=0, type=int, required=True, help="Device Id for GPU")
     parser.add_argument("--data_dir", default='ace_data', type=str, required=True,
                         help="The input data dir. Should contain the .tsv files (or other data files) for the task.")
     parser.add_argument("--model_type", default=None, type=str, required=True,
@@ -1073,8 +1125,6 @@ def main():
 
     parser.add_argument('--logging_steps', type=int, default=5,
                         help="Log every X updates steps.")
-    parser.add_argument('--save_steps', type=int, default=1000,
-                        help="Save checkpoint every X updates steps.")
     parser.add_argument("--eval_all_checkpoints", action='store_true',
                         help="Evaluate all checkpoints starting with the same prefix as model_name ending and ending with step number")
     parser.add_argument("--no_cuda", action='store_true',
@@ -1098,9 +1148,10 @@ def main():
     parser.add_argument('--save_total_limit', type=int, default=1,
                         help='Limit the total amount of checkpoints, delete the older checkpoints in the output_dir, does not delete by default')
 
+    parser.add_argument("--data_label",  default="", type=str, help='label csv file containing results')
     parser.add_argument("--train_file",  default="train.json", type=str)
     parser.add_argument("--dev_file",  default="dev.json", type=str)
-    parser.add_argument("--test_file",  default="test.json", type=str)
+    parser.add_argument("--data_file",  default="test.json", type=str)
     parser.add_argument('--max_pair_length', type=int, default=64,  help="")
     parser.add_argument("--alpha", default=1.0, type=float)
     parser.add_argument('--save_results', action='store_true')
@@ -1116,28 +1167,23 @@ def main():
     parser.add_argument('--use_typemarker', action='store_true')
     parser.add_argument('--eval_unidirect', action='store_true')
 
-    args = parser.parse_args()
+    ll = []
+    for key,val in importargs.items():
+        if isinstance(val,bool):
+            if val==True:
+                ll.extend(['--'+key])
+        elif isinstance(val,int) or isinstance(val,float):
+            ll.extend(['--'+key,str(val)])
+        else:
+            ll.extend(['--'+key,val])
+
+    args = parser.parse_known_args(ll)[0]
+             
+    os.environ['CUDA_DEVICE_ORDER']='PCI_BUS_ID'
+    os.environ['CUDA_VISIBLE_DEVICES']=str(args.device_id)
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
         raise ValueError("Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(args.output_dir))
-
-    def create_exp_dir(path, scripts_to_save=None):
-        if args.output_dir.endswith("test"):
-            return
-        if not os.path.exists(path):
-            os.mkdir(path)
-
-        print('Experiment dir : {}'.format(path))
-        if scripts_to_save is not None:
-            if not os.path.exists(os.path.join(path, 'scripts')):
-                os.mkdir(os.path.join(path, 'scripts'))
-            for script in scripts_to_save:
-                dst_file = os.path.join(path, 'scripts', os.path.basename(script))
-                shutil.copyfile(script, dst_file)
-
-    if args.do_train and args.local_rank in [-1, 0] and args.output_dir.find('test')==-1:
-        create_exp_dir(args.output_dir, scripts_to_save=['run_re.py', 'transformers/src/transformers/modeling_bert.py', 'transformers/src/transformers/modeling_albert.py'])
-
 
     # Setup distant debugging if needed
     if args.server_ip and args.server_port:
@@ -1261,60 +1307,16 @@ def main():
         global_step, tr_loss, best_f1 = train(args, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
-    # Saving best-practices: if you use defaults names for the model, you can reload it using from_pretrained()
-    if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        # Create output directory if needed
-        if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
-            os.makedirs(args.output_dir)
-        update = True
-        if args.evaluate_during_training:
-            results = evaluate(args, model, tokenizer)
-            f1 = results['f1_with_ner']
-            if f1 > best_f1:
-                best_f1 = f1
-                print ('Best F1', best_f1)
-            else:
-                update = False
-
-        if update:
-            checkpoint_prefix = 'checkpoint'
-            output_dir = os.path.join(args.output_dir, '{}-{}'.format(checkpoint_prefix, global_step))
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-            model_to_save = model.module if hasattr(model, 'module') else model  # Take care of distributed/parallel training
-
-            model_to_save.save_pretrained(output_dir)
-
-            torch.save(args, os.path.join(output_dir, 'training_args.bin'))
-            logger.info("Saving model checkpoint to %s", output_dir)
-            _rotate_checkpoints(args, checkpoint_prefix)
-
-        tokenizer.save_pretrained(args.output_dir)
-
-        torch.save(args, os.path.join(args.output_dir, 'training_args.bin'))
-
-
     # Evaluation
     results = {'dev_best_f1': best_f1}
-    if args.do_eval and args.local_rank in [-1, 0]:
+    if not args.no_test:
 
-        checkpoints = [args.output_dir]
+        logger.info("Evaluate")
 
-        WEIGHTS_NAME = 'pytorch_model.bin'
+        model = model_class.from_pretrained(args.model_name_or_path, config=config)
 
-        if args.eval_all_checkpoints:
-            checkpoints = list(os.path.dirname(c) for c in sorted(glob.glob(args.output_dir + '/**/' + WEIGHTS_NAME, recursive=True)))
-
-        logger.info("Evaluate the following checkpoints: %s", checkpoints)
-        for checkpoint in checkpoints:
-            global_step = checkpoint.split('-')[-1] if len(checkpoints) > 1 else ""
-
-            model = model_class.from_pretrained(checkpoint, config=config)
-
-            model.to(args.device)
-            result = evaluate(args, model, tokenizer, prefix=global_step, do_test=not args.no_test)
-            result = dict((k + '_{}'.format(global_step), v) for k, v in result.items())
-            results.update(result)
+        model.to(args.device)
+        results = evaluate(args, model, tokenizer, do_test=not args.no_test)
         print (results)
 
         if args.no_test:  # choose best resutls on dev set
@@ -1325,11 +1327,11 @@ def main():
                     bestk = k
             print (bestk)
 
-        output_eval_file = os.path.join(args.output_dir, "results.json")
+        output_eval_file = os.path.join(args.output_dir, 'F1_'+str(args.data_label)+'.json')
         json.dump(results, open(output_eval_file, "w"))
 
 
 if __name__ == "__main__":
-    main()
+    call_pl_marker_re()
 
 
