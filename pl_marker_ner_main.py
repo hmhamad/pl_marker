@@ -88,14 +88,11 @@ MODEL_CLASSES = {
 
 
 class ACEDatasetNER(Dataset):
-    def __init__(self, tokenizer, args=None, evaluate=False, do_test=False):
+    def __init__(self, tokenizer, args=None, evaluate=False, data_file_path=""):
         if not evaluate:
             file_path = args.train_file
         else:
-            if do_test:
-                file_path = args.data_file
-            else:
-                file_path = args.dev_file
+            file_path = data_file_path
 
         assert os.path.isfile(file_path)
 
@@ -113,6 +110,8 @@ class ACEDatasetNER(Dataset):
             self.ner_label_list = ['NIL', 'FAC', 'WEA', 'LOC', 'VEH', 'GPE', 'ORG', 'PER']
         elif args.data_dir.find('scierc')!=-1:
             self.ner_label_list = ['NIL', 'Method', 'OtherScientificTerm', 'Task', 'Generic', 'Material', 'Metric']
+        elif args.data_dir.find('conll04')!=-1:
+            self.ner_label_list = ['NIL', 'Loc', 'Org', 'Peop', 'Other']
         else:
             self.ner_label_list = ['NIL', 'CARDINAL', 'DATE', 'EVENT', 'FAC', 'GPE', 'LANGUAGE', 'LAW', 'LOC', 'MONEY', 'NORP', 'ORDINAL', 'ORG', 'PERCENT', 'PERSON', 'PRODUCT', 'QUANTITY', 'TIME', 'WORK_OF_ART']
 
@@ -572,7 +571,7 @@ def train(args, model, tokenizer):
 
         # Save model checkpoint
         if args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
-            results = evaluate(args, model, tokenizer)
+            results = evaluate(args, model, tokenizer, data_file_path=args.dev_file, prefix="dev")
             f1 = results['f1']
 
             if f1 > best_f1:
@@ -590,13 +589,13 @@ def train(args, model, tokenizer):
 
     return global_step, tr_loss / global_step, best_f1
 
-def evaluate(args, model, tokenizer, prefix="", do_test=False):
+def evaluate(args, model, tokenizer, prefix="", data_file_path = ""):
 
     eval_output_dir = args.output_dir
 
     results = {}
 
-    eval_dataset = ACEDatasetNER(tokenizer=tokenizer, args=args, evaluate=True, do_test=do_test)
+    eval_dataset = ACEDatasetNER(tokenizer=tokenizer, args=args, evaluate=True, data_file_path = data_file_path)
     ner_golden_labels = set(eval_dataset.ner_golden_labels)
     ner_tot_recall = eval_dataset.tot_recall
 
@@ -644,7 +643,12 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
 
             ner_logits = outputs[0]
             ner_probs = torch.nn.functional.softmax(ner_logits, dim=-1)
+            ner_probs_copy = ner_probs.detach().clone()
             ner_probs, ner_preds = torch.max(ner_probs, dim=-1)
+            max_mask = (torch.arange(ner_probs_copy.size(2),device=ner_logits.device).reshape(1, 1, -1) == ner_preds.unsqueeze(2))
+            ner_probs_copy[max_mask] = 0 # to get second largest probability
+            ner_probs_secondlargest, _ =  torch.max(ner_probs_copy, dim=-1)
+            ner_probs_top2 = ner_probs - ner_probs_secondlargest
             ner_logits, _ = torch.max(ner_logits, dim=-1)
 
             for i in range(len(indexs)):
@@ -654,7 +658,7 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
                     obj = m2s[j]
                     ner_label = eval_dataset.ner_label_list[ner_preds[i,j]]
                     if ner_label!='NIL':
-                        scores[(index[0], index[1])][(obj[0], obj[1])] = (float(ner_logits[i,j]), float(ner_probs[i,j]), ner_label)
+                        scores[(index[0], index[1])][(obj[0], obj[1])] = (float(ner_logits[i,j]), float(ner_probs[i,j]), float(ner_probs_top2[i,j]), ner_label)
 
     cor = 0 
     tot_pred = 0
@@ -664,9 +668,9 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
     for example_index, pair_dict in scores.items():  
 
         sentence_results = []
-        for k1, (v2_logit, v2_prob, v2_ner_label) in pair_dict.items():
+        for k1, (v2_logit, v2_prob, v2_top2, v2_ner_label) in pair_dict.items():
             if v2_ner_label!='NIL':
-                sentence_results.append((v2_logit, v2_prob, k1, v2_ner_label))
+                sentence_results.append((v2_logit, v2_prob, v2_top2, k1, v2_ner_label))
 
         sentence_results.sort(key=lambda x: -x[1])
         no_overlap = []
@@ -678,62 +682,62 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
             return False
 
         for item in sentence_results:
-            m2 = item[2]
+            m2 = item[3]
             overlap = False
             for x in no_overlap:
-                _m2 = x[2]
+                _m2 = x[3]
                 if (is_overlap(m2, _m2)):
                     if args.data_dir.find('ontonotes')!=-1:
                         overlap = True
                         break
                     else:
                     
-                        if item[3]==x[3]:
+                        if item[4]==x[4]:
                             overlap = True
                             break
 
             if not overlap:
                 no_overlap.append(item)
 
-            pred_ner_label = item[3]
+            pred_ner_label = item[4]
             tot_pred_tot += 1
-            if (example_index, m2, pred_ner_label) in ner_golden_labels:
-                cor_tot += 1
+            if not args.do_predict:
+                if (example_index, m2, pred_ner_label) in ner_golden_labels:
+                    cor_tot += 1
 
         for item in no_overlap:
-            m2 = item[2]
-            pred_ner_label = item[3]
-            logit = item[0]; prob = item[1]
+            m2 = item[3]
+            pred_ner_label = item[4]
+            logit = item[0]; prob = item[1]; top2 = item[2]
             tot_pred += 1
             if args.output_results:
-                predict_ners[example_index].append( (logit, prob, m2[0], m2[1], pred_ner_label))
-            if (example_index, m2, pred_ner_label) in ner_golden_labels:
-                cor += 1        
+                predict_ners[example_index].append( (logit, prob, top2, m2[0], m2[1], pred_ner_label))
+            if not args.do_predict:
+                if (example_index, m2, pred_ner_label) in ner_golden_labels:
+                    cor += 1        
 
-    evalTime = timeit.default_timer() - start_time
-    logger.info("  Evaluation done in total %f secs (%f example per second)", evalTime,  len(eval_dataset) / evalTime)
-
-
-    precision_score = p = cor / tot_pred if tot_pred > 0 else 0 
-    recall_score = r = cor / ner_tot_recall 
-    f1 = 2 * (p * r) / (p + r) if cor > 0 else 0.0
-
-    p = cor_tot / tot_pred_tot if tot_pred_tot > 0 else 0 
-    r = cor_tot / ner_tot_recall 
-    f1_tot = 2 * (p * r) / (p + r) if cor > 0 else 0.0
-
-    results = {'f1':  f1, 'f1_overlap': f1_tot, 'precision': precision_score, 'recall': recall_score}
+    if not args.do_predict:
+        evalTime = timeit.default_timer() - start_time
+        logger.info("  Evaluation done in total %f secs (%f example per second)", evalTime,  len(eval_dataset) / evalTime)
 
 
+        precision_score = p = cor / tot_pred if tot_pred > 0 else 0 
+        recall_score = r = cor / ner_tot_recall 
+        f1 = 2 * (p * r) / (p + r) if cor > 0 else 0.0
 
-    logger.info("Result: %s", json.dumps(results))
+        p = cor_tot / tot_pred_tot if tot_pred_tot > 0 else 0 
+        r = cor_tot / ner_tot_recall 
+        f1_tot = 2 * (p * r) / (p + r) if cor > 0 else 0.0
+
+        results = {'f1':  f1, 'f1_overlap': f1_tot, 'precision': precision_score, 'recall': recall_score}
+
+
+
+        logger.info("Result: %s", json.dumps(results))
 
     if args.output_results:
         f = open(eval_dataset.file_path)
-        if do_test:
-            output_w = open(os.path.join(args.output_dir, 'ent_pred_test.json'), 'w')  
-        else:
-            output_w = open(os.path.join(args.output_dir, 'ent_pred_dev.json'), 'w')  
+        output_w = open(os.path.join(args.output_dir, f'ent_pred_{prefix}.json'), 'w')  
         for l_idx, line in enumerate(f):
             data = json.loads(line)
             num_sents = len(data['sentences'])
@@ -746,7 +750,7 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
             data['predicted_ner'] = predicted_ner
             output_w.write(json.dumps(data)+'\n')
 
-    return results
+        return results
 
 
 def call_pl_marker_ner(importargs=None):
@@ -778,7 +782,11 @@ def call_pl_marker_ner(importargs=None):
     parser.add_argument("--do_eval", action='store_true',
                         help="Whether to run eval on the dev set.")
     parser.add_argument("--do_test", action='store_true',
-                        help="Whether to run test on the dev set.")
+                        help="Whether to run test on the given data file.")
+    parser.add_argument("--do_predict", action='store_true',
+                        help="Whether to run prediction on the given data file.")
+    parser.add_argument("--data_label", default="", type=str,
+                        help="Label to give predictions and test results files")
 
     parser.add_argument("--evaluate_during_training", action='store_true',
                         help="Rul evaluation during training at each logging step.")
@@ -841,7 +849,6 @@ def call_pl_marker_ner(importargs=None):
     parser.add_argument('--norm_emb', action='store_true')
     parser.add_argument('--output_results', action='store_true')
     parser.add_argument('--onedropout', action='store_true')
-    parser.add_argument('--no_test', action='store_true')
     parser.add_argument('--use_full_layer', type=int, default=-1,  help="")
     parser.add_argument('--shuffle', action='store_true')
     parser.add_argument('--group_edge', action='store_true')
@@ -885,6 +892,8 @@ def call_pl_marker_ner(importargs=None):
     set_seed(args)
     if args.data_dir.find('ace')!=-1:
         num_labels = 8
+    elif args.data_dir.find('conll04')!=-1:
+        num_labels = 5
     elif args.data_dir.find('scierc')!=-1:
         num_labels = 7
     elif args.data_dir.find('ontonotes')!=-1:
@@ -962,20 +971,21 @@ def call_pl_marker_ner(importargs=None):
 
     # Evaluation
     results = {'dev_best_f1': best_f1}
-    if not args.no_test:
+    if args.do_test or args.do_predict:
         logger.info("Evaluate on test set")
 
         model = model_class.from_pretrained(args.model_name_or_path, config=config)
 
         model.to(args.device)
-        result = evaluate(args, model, tokenizer, do_test=not args.no_test)
+        result = evaluate(args, model, tokenizer, prefix = args.data_label, data_file_path = args.data_file)
 
-        result = dict((k, v) for k, v in result.items())
-        results.update(result)
+        if args.do_test:
+            result = dict((k, v) for k, v in result.items())
+            results.update(result)
 
-        # output_eval_file = os.path.join(args.output_dir, "ner_results.json")
-        # json.dump(results, open(output_eval_file, "w"))
-        logger.info("NER Result: %s", json.dumps(results))
+            # output_eval_file = os.path.join(args.output_dir, "ner_results.json")
+            # json.dump(results, open(output_eval_file, "w"))
+            logger.info("NER Result: %s", json.dumps(results))
 
 if __name__ == "__main__":
     call_pl_marker_ner()

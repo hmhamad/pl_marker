@@ -73,26 +73,25 @@ task_ner_labels = {
     'ace04': ['FAC', 'WEA', 'LOC', 'VEH', 'GPE', 'ORG', 'PER'],
     'ace05': ['FAC', 'WEA', 'LOC', 'VEH', 'GPE', 'ORG', 'PER'],
     'scierc': ['Method', 'OtherScientificTerm', 'Task', 'Generic', 'Material', 'Metric'],
+    'conll04': ['Loc', 'Org', 'Peop', 'Other'],
 }
 
 task_rel_labels = {
     'ace04': ['PER-SOC', 'OTHER-AFF', 'ART', 'GPE-AFF', 'EMP-ORG', 'PHYS'],
     'ace05': ['PER-SOC', 'ART', 'ORG-AFF', 'GEN-AFF', 'PHYS', 'PART-WHOLE'],
     'scierc': ['PART-OF', 'USED-FOR', 'FEATURE-OF', 'CONJUNCTION', 'EVALUATE-FOR', 'HYPONYM-OF', 'COMPARE'],
+    'conll04': ['PART-OF', 'USED-FOR', 'FEATURE-OF',  'EVALUATE-FOR', 'HYPONYM-OF'],
 }
 
 
 
 class ACEDataset(Dataset):
-    def __init__(self, tokenizer, args=None, evaluate=False, do_test=False, max_pair_length=None):
+    def __init__(self, tokenizer, args=None, evaluate=False, data_file_path="", max_pair_length=None):
 
         if not evaluate:
             file_path = os.path.join(args.data_dir, args.train_file)
         else:
-            if do_test:
-                file_path = args.data_file
-            else:
-                file_path = args.dev_file
+            file_path = data_file_path
 
         assert os.path.isfile(file_path)
 
@@ -146,6 +145,17 @@ class ACEDataset(Dataset):
                 self.sym_labels = ['NIL', 'CONJUNCTION', 'COMPARE']
                 self.label_list = self.sym_labels + label_list
 
+        elif args.data_dir.find('conll04')!=-1:      
+            self.ner_label_list = ['NIL', 'Loc', 'Org', 'Peop', 'Other']
+
+            if args.no_sym:
+                label_list = ['Work_For', 'Kill', 'OrgBased_In', 'Live_In', 'Located_In']
+                self.sym_labels = ['NIL']
+                self.label_list = self.sym_labels + label_list
+            else:
+                label_list = ['Work_For', 'Kill', 'OrgBased_In', 'Live_In', 'Located_In']
+                self.sym_labels = ['NIL']
+                self.label_list = self.sym_labels + label_list
         else:
             assert (False)  
 
@@ -351,10 +361,10 @@ class ACEDataset(Dataset):
                     for sub in entities:    
                         cur_ins = []
 
-                        if sub[2] < 10000:
-                            sub_s = token2subword[sub[2]] - doc_offset + 1
-                            sub_e = token2subword[sub[3]+1] - doc_offset
-                            sub_label = ner_label_map[sub[4]]
+                        if sub[3] < 10000:
+                            sub_s = token2subword[sub[3]] - doc_offset + 1
+                            sub_e = token2subword[sub[4]+1] - doc_offset
+                            sub_label = ner_label_map[sub[5]]
 
                             if self.use_typemarker:
                                 l_m = '[unused%d]' % ( 2 + sub_label )
@@ -374,9 +384,9 @@ class ACEDataset(Dataset):
                         if sub_e >= self.max_seq_length-1:
                             continue
                         # assert(sub_e < self.max_seq_length)
-                        for logit, prob, start, end, obj_label in sentence_ners:
+                        for logit, prob, top2, start, end, obj_label in sentence_ners:
                             if self.model_type.endswith('nersub'):
-                                if start==sub[2] and end==sub[3]:
+                                if start==sub[3] and end==sub[4]:
                                     continue
 
                             doc_entity_start = token2subword[start]
@@ -385,17 +395,17 @@ class ACEDataset(Dataset):
                             right = doc_entity_end - doc_offset
 
                             obj = (start, end)
-                            if obj[0] >= sub[2]:
+                            if obj[0] >= sub[3]:
                                 left += 1
-                                if obj[0] > sub[3]:
+                                if obj[0] > sub[4]:
                                     left += 1
 
-                            if obj[1] >= sub[2]:   
+                            if obj[1] >= sub[3]:   
                                 right += 1
-                                if obj[1] > sub[3]:
+                                if obj[1] > sub[4]:
                                     right += 1
         
-                            label = pos2label.get((sub[2], sub[3], obj[0], obj[1]), 0)
+                            label = pos2label.get((sub[3], sub[4], obj[0], obj[1]), 0)
 
                             if right >= self.max_seq_length-1:
                                 continue
@@ -623,10 +633,10 @@ def train(args, model, tokenizer):
 
     model.zero_grad()
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
-    best_f1_with_ner = -1; best_f1 = -1
+    best_f1_with_ner = -1; best_f1 = -1; best_ner_f1 = -1
 
     with open(os.path.join(args.output_dir,'F1_epochs.csv'),'w',newline='') as csv_file:
-        header_row = ['{:<10}'.format('Epoch'),'{:<30}'.format('NER_Micro_F1'), '{:<30}'.format('Rel+_Valid_Micro_F1'), '{:<30}'.format('Best_Rel+_Valid_Micro_F1'), '{:<30}'.format('Rel_Valid_Micro_F1'), '{:<30}'.format('Best_Rel_Valid_Micro_F1')]
+        header_row = ['{:<10}'.format('Epoch'),'{:<30}'.format('NER_Valid_Micro_F1'), '{:<30}'.format('Best_NER_Valid_Micro_F1'), '{:<30}'.format('Rel+_Valid_Micro_F1'), '{:<30}'.format('Best_Rel+_Valid_Micro_F1'), '{:<30}'.format('Rel_Valid_Micro_F1'), '{:<30}'.format('Best_Rel_Valid_Micro_F1')]
         writer = csv.writer(csv_file,delimiter=CSV_DELIMETER); writer.writerow(header_row)
     
     for epoch in range(int(args.num_train_epochs)):
@@ -694,7 +704,7 @@ def train(args, model, tokenizer):
 
         # Save model checkpoint
         if args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
-            results = evaluate(args, model, tokenizer, prefix='eval')
+            results = evaluate(args, model, tokenizer, prefix='eval', data_file_path= args.dev_file)
             f1_with_ner = results['rel_f1_with_ner']; f1 = results['rel_f1']; ner_f1 = results['ner_f1']
 
             if f1_with_ner > best_f1_with_ner:
@@ -713,10 +723,13 @@ def train(args, model, tokenizer):
     
             if f1 > best_f1:
                 best_f1 = f1
+            
+            if ner_f1 > best_ner_f1:
+                best_ner_f1 = ner_f1
 
 
         with open(os.path.join(args.output_dir,'F1_epochs.csv'),'a') as csv_file:
-            row = ['{:<10}'.format(f'{epoch+1}/'+str(int(args.num_train_epochs))),'{:<30}'.format(f'{ner_f1:.4f}'), '{:<30}'.format(f'{f1:.4f}'), '{:<30}'.format(f'{best_f1:.4f}'), '{:<30}'.format(f'{f1_with_ner:.4f}'), '{:<30}'.format(f'{best_f1_with_ner:.4f}')]
+            row = ['{:<10}'.format(f'{epoch+1}/'+str(int(args.num_train_epochs))),'{:<30}'.format(f'{ner_f1*100:.4f}'), '{:<30}'.format(f'{best_ner_f1*100:.4f}'), '{:<30}'.format(f'{f1*100:.4f}'), '{:<30}'.format(f'{best_f1*100:.4f}'), '{:<30}'.format(f'{f1_with_ner*100:.4f}'), '{:<30}'.format(f'{best_f1_with_ner*100:.4f}')]
             writer = csv.writer(csv_file,delimiter=CSV_DELIMETER); writer.writerow(row)
     
     return global_step, tr_loss / global_step, best_f1_with_ner
@@ -724,11 +737,11 @@ def train(args, model, tokenizer):
 def to_list(tensor):
     return tensor.detach().cpu().tolist()
 
-def evaluate(args, model, tokenizer, prefix="", do_test=False):
+def evaluate(args, model, tokenizer, prefix="", data_file_path = ""):
 
     eval_output_dir = args.output_dir
 
-    eval_dataset = ACEDataset(tokenizer=tokenizer, args=args, evaluate=True, do_test=do_test, max_pair_length=args.max_pair_length)
+    eval_dataset = ACEDataset(tokenizer=tokenizer, args=args, evaluate=True, data_file_path = data_file_path, max_pair_length=args.max_pair_length)
     golden_labels = set(eval_dataset.golden_labels)
     golden_labels_withner = set(eval_dataset.golden_labels_withner)
     label_list = list(eval_dataset.label_list)
@@ -801,12 +814,12 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
                 index = indexs[i]
                 sub = subs[i]
                 m2s = batch_m2s[i]
-                example_subs.add(((index[0], index[1]), (sub[2], sub[3])))
+                example_subs.add(((index[0], index[1]), (sub[3], sub[4])))
                 for j in range(len(m2s)):
                     obj = m2s[j]
                     ner_label = eval_dataset.ner_label_list[ner_preds[i,j]]
-                    scores[(index[0], index[1])][( (sub[2], sub[3]), (obj[0], obj[1]))] = (logits[i, j].tolist(),probs[i, j].tolist(),ner_label)
-            
+                    scores[(index[0], index[1])][( (sub[3], sub[4]), (obj[0], obj[1]))] = (logits[i, j].tolist(),probs[i, j].tolist(),ner_label)
+     
     cor = 0 
     tot_pred = 0
     cor_with_ner = 0
@@ -899,13 +912,14 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
                 m2 = item[3]
                 pred_label = item[4]
                 tot_pred += 1
-                if pred_label in sym_labels:
-                    tot_pred += 1 # duplicate
-                    if (example_index, m1, m2, pred_label) in golden_labels or (example_index, m2, m1, pred_label) in golden_labels:
-                        cor += 2
-                else:
-                    if (example_index, m1, m2, pred_label) in golden_labels:
-                        cor += 1        
+                if not args.do_predict:
+                    if pred_label in sym_labels:
+                        tot_pred += 1 # duplicate
+                        if (example_index, m1, m2, pred_label) in golden_labels or (example_index, m2, m1, pred_label) in golden_labels:
+                            cor += 2
+                    else:
+                        if (example_index, m1, m2, pred_label) in golden_labels:
+                            cor += 1        
 
                 if m1 not in pos2ner:
                     pos2ner[m1] = item[5]
@@ -913,29 +927,31 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
                     pos2ner[m2] = item[6]
 
                 output_preds.append(item)
-                if pred_label in sym_labels:
-                    if (example_index, (m1[0], m1[1], pos2ner[m1]), (m2[0], m2[1], pos2ner[m2]), pred_label) in golden_labels_withner  \
-                            or (example_index,  (m2[0], m2[1], pos2ner[m2]), (m1[0], m1[1], pos2ner[m1]), pred_label) in golden_labels_withner:
-                        cor_with_ner += 2
-                else:  
-                    if (example_index, (m1[0], m1[1], pos2ner[m1]), (m2[0], m2[1], pos2ner[m2]), pred_label) in golden_labels_withner:
-                        cor_with_ner += 1      
+                
+                if not args.do_predict:
+                    if pred_label in sym_labels:
+                        if (example_index, (m1[0], m1[1], pos2ner[m1]), (m2[0], m2[1], pos2ner[m2]), pred_label) in golden_labels_withner  \
+                                or (example_index,  (m2[0], m2[1], pos2ner[m2]), (m1[0], m1[1], pos2ner[m1]), pred_label) in golden_labels_withner:
+                            cor_with_ner += 2
+                    else:  
+                        if (example_index, (m1[0], m1[1], pos2ner[m1]), (m2[0], m2[1], pos2ner[m2]), pred_label) in golden_labels_withner:
+                            cor_with_ner += 1      
 
-            if do_test:
-                #output_w.write(json.dumps(output_preds) + '\n')
-                tot_output_results[example_index[0]].append((example_index[1],  output_preds))
+            #output_w.write(json.dumps(output_preds) + '\n')
+            tot_output_results[example_index[0]].append((example_index[1],  output_preds))
 
-            # refine NER results
-            ner_results = list(global_predicted_ners[example_index])
-            for i in range(len(ner_results)):
-                logit, prob, start, end, label = ner_results[i] 
-                if (example_index, (start, end), label) in ner_golden_labels:
-                    ner_ori_cor += 1
-                if (start, end) in pos2ner:
-                    label = pos2ner[(start, end)]
-                if (example_index, (start, end), label) in ner_golden_labels:
-                    ner_cor += 1
-                ner_tot_pred += 1
+            if not args.do_predict:
+                # refine NER results
+                ner_results = list(global_predicted_ners[example_index])
+                for i in range(len(ner_results)):
+                    logit, prob, top2, start, end, label = ner_results[i] 
+                    if (example_index, (start, end), label) in ner_golden_labels:
+                        ner_ori_cor += 1
+                    if (start, end) in pos2ner:
+                        label = pos2ner[(start, end)]
+                    if (example_index, (start, end), label) in ner_golden_labels:
+                        ner_cor += 1
+                    ner_tot_pred += 1
         
     else:
 
@@ -950,7 +966,7 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
                 m2 = k1[1]
                 if m1 == m2:
                     continue
-              
+            
                 pred_label = np.argmax(v1)
                 if pred_label>0 and pred_label < num_label:
 
@@ -1029,42 +1045,43 @@ def evaluate(args, model, tokenizer, prefix="", do_test=False):
                 ner_tot_pred += 1
 
 
-    evalTime = timeit.default_timer() - start_time
-    logger.info("  Evaluation done in total %f secs (%f example per second)", evalTime,  len(global_predicted_ners) / evalTime)
+        evalTime = timeit.default_timer() - start_time
+        logger.info("  Evaluation done in total %f secs (%f example per second)", evalTime,  len(global_predicted_ners) / evalTime)
 
-    if do_test:
-        f_original = open(args.data_file,'r')
-        with open(os.path.join(args.output_dir, args.data_label+'_predictions.json'), 'w') as output_w:
-            for l_idx, line in enumerate(f_original):
-                data = json.loads(line)
-                data['ner'] = data['predicted_ner']; del data['predicted_ner']
-                rels = []
-                for i in range(len(data['sentences'])):
-                    temp = [item[1] for item in tot_output_results[l_idx] if item[0] == i]
-                    temp = temp[0] if temp else temp #if not empty, remove outer list
-                    rels.append(temp)
-                data['relations'] = rels
-                output_w.write(json.dumps(data)+'\n')
+    file_path = data_file_path
 
-            
-    ner_p = ner_cor / ner_tot_pred if ner_tot_pred > 0 else 0 
-    ner_r = ner_cor / len(ner_golden_labels) 
-    ner_f1 = 2 * (ner_p * ner_r) / (ner_p + ner_r) if ner_cor > 0 else 0.0
+    f_original = open(file_path,'r')
+    with open(os.path.join(args.output_dir, prefix+'_predictions.json'), 'w') as output_w:
+        for l_idx, line in enumerate(f_original):
+            data = json.loads(line)
+            data['ner'] = data['predicted_ner']; del data['predicted_ner']
+            rels = []
+            for i in range(len(data['sentences'])):
+                temp = [item[1] for item in tot_output_results[l_idx] if item[0] == i]
+                temp = temp[0] if temp else temp #if not empty, remove outer list
+                rels.append(temp)
+            data['relations'] = rels
+            output_w.write(json.dumps(data)+'\n')
 
-    p = cor / tot_pred if tot_pred > 0 else 0 
-    r = cor / tot_recall 
-    f1 = 2 * (p * r) / (p + r) if cor > 0 else 0.0
-    assert(tot_recall==len(golden_labels))
+    if not args.do_predict:        
+        ner_p = ner_cor / ner_tot_pred if ner_tot_pred > 0 else 0 
+        ner_r = ner_cor / len(ner_golden_labels) 
+        ner_f1 = 2 * (ner_p * ner_r) / (ner_p + ner_r) if ner_cor > 0 else 0.0
 
-    p_with_ner = cor_with_ner / tot_pred if tot_pred > 0 else 0 
-    r_with_ner = cor_with_ner / tot_recall
-    assert(tot_recall==len(golden_labels_withner))
-    f1_with_ner = 2 * (p_with_ner * r_with_ner) / (p_with_ner + r_with_ner) if cor_with_ner > 0 else 0.0
+        p = cor / tot_pred if tot_pred > 0 else 0 
+        r = cor / tot_recall 
+        f1 = 2 * (p * r) / (p + r) if cor > 0 else 0.0
+        assert(tot_recall==len(golden_labels))
 
-    results = {'ner_f1': ner_f1, 'rel_f1':  f1,  'rel_f1_with_ner': f1_with_ner}
-    logger.info("Result: %s", json.dumps(results))
+        p_with_ner = cor_with_ner / tot_pred if tot_pred > 0 else 0 
+        r_with_ner = cor_with_ner / tot_recall
+        assert(tot_recall==len(golden_labels_withner))
+        f1_with_ner = 2 * (p_with_ner * r_with_ner) / (p_with_ner + r_with_ner) if cor_with_ner > 0 else 0.0
 
-    return results
+        results = {'ner_f1': ner_f1, 'rel_f1':  f1,  'rel_f1_with_ner': f1_with_ner}
+        logger.info("Result: %s", json.dumps(results))
+
+        return results
 
 
 
@@ -1096,6 +1113,10 @@ def call_pl_marker_re(importargs=None):
                         help="Whether to run training.")
     parser.add_argument("--do_eval", action='store_true',
                         help="Whether to run eval on the dev set.")
+    parser.add_argument('--do_test', action='store_true',
+                        help="Whether to run evaluation on the given data file.")
+    parser.add_argument('--do_predict', action='store_true',
+                        help="Whether to run perdiction on the given data file.")
 
     parser.add_argument("--evaluate_during_training", action='store_true',
                         help="Rul evaluation during training at each logging step.")
@@ -1148,14 +1169,13 @@ def call_pl_marker_re(importargs=None):
     parser.add_argument('--save_total_limit', type=int, default=1,
                         help='Limit the total amount of checkpoints, delete the older checkpoints in the output_dir, does not delete by default')
 
-    parser.add_argument("--data_label",  default="", type=str, help='label csv file containing results')
+    parser.add_argument("--data_label",  default="", type=str, help='label csv file containing results or predictions')
     parser.add_argument("--train_file",  default="train.json", type=str)
     parser.add_argument("--dev_file",  default="dev.json", type=str)
     parser.add_argument("--data_file",  default="test.json", type=str)
     parser.add_argument('--max_pair_length', type=int, default=64,  help="")
     parser.add_argument("--alpha", default=1.0, type=float)
     parser.add_argument('--save_results', action='store_true')
-    parser.add_argument('--no_test', action='store_true')
     parser.add_argument('--eval_logsoftmax', action='store_true')
     parser.add_argument('--eval_softmax', action='store_true')
     parser.add_argument('--shuffle', action='store_true')
@@ -1228,6 +1248,13 @@ def call_pl_marker_re(importargs=None):
             num_labels = 8 + 8 - 1
         else:
             num_labels = 8 + 8 - 3
+    elif args.data_dir.find('conll04')!=-1:
+        num_ner_labels = 5
+
+        if args.no_sym:
+            num_labels = 6 + 6 - 1
+        else:
+            num_labels = 6 + 6 - 1
     else:
         assert (False)
 
@@ -1309,27 +1336,24 @@ def call_pl_marker_re(importargs=None):
 
     # Evaluation
     results = {'dev_best_f1': best_f1}
-    if not args.no_test:
+    if args.do_test or args.do_predict:
 
         logger.info("Evaluate")
 
         model = model_class.from_pretrained(args.model_name_or_path, config=config)
 
         model.to(args.device)
-        results = evaluate(args, model, tokenizer, do_test=not args.no_test)
+        results = evaluate(args, model, tokenizer, prefix = args.data_label, data_file_path=args.data_file)
         print (results)
 
-        if args.no_test:  # choose best resutls on dev set
-            bestv = 0
-            k = 0
-            for k, v in results.items():
-                if v > bestv:
-                    bestk = k
-            print (bestk)
-
-        output_eval_file = os.path.join(args.output_dir, 'F1_'+str(args.data_label)+'.json')
-        json.dump(results, open(output_eval_file, "w"))
-
+        if args.do_test:
+            F1_path = os.path.join(args.output_dir, 'F1_'+str(args.data_label)+'.csv')
+            ner_f1 = results['ner_f1']; f1 = results['rel_f1']; f1_with_nec = results['rel_f1_with_ner']
+            with open(F1_path, 'w') as csv_file:
+                row1= ['{:<30}'.format('NER_Micro_F1'), '{:<30}'.format('Rel+_Micro_F1'), '{:<30}'.format('Rel_Micro_F1')]
+                row2 = ['{:<30}'.format(f'{ner_f1*100:.4f}'), '{:<30}'.format(f'{f1*100:.4f}'), '{:<30}'.format(f'{f1_with_nec*100:.4f}')]
+                writer = csv.writer(csv_file, delimiter=CSV_DELIMETER, quotechar='|', quoting=csv.QUOTE_MINIMAL)
+                writer.writerow(row1); writer.writerow(row2)
 
 if __name__ == "__main__":
     call_pl_marker_re()
