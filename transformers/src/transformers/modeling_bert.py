@@ -2281,7 +2281,7 @@ class BertForACEBothOneDropoutSub(BertPreTrainedModel):
 
         m1_scores = self.re_classifier_m1(m1_states)  # bsz, num_label
         m2_scores = self.re_classifier_m2(feature_vector) # bsz, ent_len, num_label
-        re_prediction_scores = m1_scores.unsqueeze(1) + m2_scores
+        re_prediction_scores = m1_scores.unsqueeze(1) + m2_scores # bsz, ent_len, num_label
 
         outputs = (re_prediction_scores, ner_prediction_scores) + outputs[2:]  # Add hidden states and attention if they are here
 
@@ -2293,6 +2293,11 @@ class BertForACEBothOneDropoutSub(BertPreTrainedModel):
 
             loss = re_loss + ner_loss
             outputs = (loss, re_loss, ner_loss) + outputs
+        else: # return relation embedding representation in eval mode
+            m1_states = m1_states.unsqueeze(1)
+            repeat_vals = (-1, feature_vector.shape[1] // m1_states.shape[1], -1)
+            rel_concat_repr = torch.cat((feature_vector, m1_states.expand(*repeat_vals)), dim=-1)
+            outputs = outputs + (rel_concat_repr,)
 
         return outputs  # (masked_lm_loss), prediction_scores, (hidden_states), (attentions)
 

@@ -636,7 +636,7 @@ def train(args, model, tokenizer):
     best_f1_with_ner = -1; best_f1 = -1; best_ner_f1 = -1
 
     with open(os.path.join(args.output_dir,'F1_epochs.csv'),'w',newline='') as csv_file:
-        header_row = ['{:<10}'.format('Epoch'),'{:<30}'.format('NER_Valid_Micro_F1'), '{:<30}'.format('Best_NER_Valid_Micro_F1'), '{:<30}'.format('Rel+_Valid_Micro_F1'), '{:<30}'.format('Best_Rel+_Valid_Micro_F1'), '{:<30}'.format('Rel_Valid_Micro_F1'), '{:<30}'.format('Best_Rel_Valid_Micro_F1')]
+        header_row = ['{:<10}'.format('Epoch'),'{:<30}'.format('NER_Valid_Micro_F1'), '{:<30}'.format('Best_NER_Valid_Micro_F1'), '{:<30}'.format('Rel_Valid_Micro_F1'), '{:<30}'.format('Best_Rel_Valid_Micro_F1'), '{:<30}'.format('Rel+_Valid_Micro_F1'), '{:<30}'.format('Best_Rel+_Valid_Micro_F1')]
         writer = csv.writer(csv_file,delimiter=CSV_DELIMETER); writer.writerow(header_row)
     
     for epoch in range(int(args.num_train_epochs)):
@@ -704,7 +704,7 @@ def train(args, model, tokenizer):
 
         # Save model checkpoint
         if args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
-            results = evaluate(args, model, tokenizer, prefix='eval', data_file_path= args.dev_file)
+            results = evaluate(args, model, tokenizer, prefix='eval', data_file_path= args.dev_file, save_embeddings = args.save_embeddings)
             f1_with_ner = results['rel_f1_with_ner']; f1 = results['rel_f1']; ner_f1 = results['ner_f1']
 
             if f1_with_ner > best_f1_with_ner:
@@ -737,7 +737,7 @@ def train(args, model, tokenizer):
 def to_list(tensor):
     return tensor.detach().cpu().tolist()
 
-def evaluate(args, model, tokenizer, prefix="", data_file_path = ""):
+def evaluate(args, model, tokenizer, prefix="", data_file_path = "", save_embeddings = False):
 
     eval_output_dir = args.output_dir
 
@@ -796,6 +796,7 @@ def evaluate(args, model, tokenizer, prefix="", data_file_path = ""):
             outputs = model(**inputs)
 
             logits = outputs[0]
+            rel_repr = outputs[2]
 
             if args.eval_logsoftmax:  # perform a bit better
                 probs = torch.nn.functional.log_softmax(logits, dim=-1)
@@ -818,7 +819,7 @@ def evaluate(args, model, tokenizer, prefix="", data_file_path = ""):
                 for j in range(len(m2s)):
                     obj = m2s[j]
                     ner_label = eval_dataset.ner_label_list[ner_preds[i,j]]
-                    scores[(index[0], index[1])][( (sub[3], sub[4]), (obj[0], obj[1]))] = (logits[i, j].tolist(),probs[i, j].tolist(),ner_label)
+                    scores[(index[0], index[1])][( (sub[3], sub[4]), (obj[0], obj[1]))] = (logits[i, j].tolist(),probs[i, j].tolist(),ner_label, rel_repr[i,j])
      
     cor = 0 
     tot_pred = 0
@@ -835,7 +836,7 @@ def evaluate(args, model, tokenizer, prefix="", data_file_path = ""):
 
             visited  = set([])
             sentence_results = []
-            for k1, (v1_logit,v1_prob,v2_ner_label) in pair_dict.items():
+            for k1, (v1_logit,v1_prob,v2_ner_label,v1_rel_repr) in pair_dict.items():
                 
                 if k1 in visited:
                     continue
@@ -845,6 +846,7 @@ def evaluate(args, model, tokenizer, prefix="", data_file_path = ""):
                     continue
                 v1_logit = list(v1_logit)
                 v1_prob = list(v1_prob)
+                v1_rel_repr = v1_rel_repr
                 m1 = k1[0]
                 m2 = k1[1]
                 if m1 == m2:
@@ -853,13 +855,14 @@ def evaluate(args, model, tokenizer, prefix="", data_file_path = ""):
                 v2s = pair_dict.get(k2, None)
                 if v2s is not None:
                     visited.add(k2)
-                    v2_logit, v2_prob, v1_ner_label = v2s
+                    v2_logit, v2_prob, v1_ner_label, v2_rel_repr = v2s
                     v2_prob = v2_prob[ : len(sym_labels)] + v2_prob[num_label:] + v2_prob[len(sym_labels) : num_label]
                     v2_logit = v2_logit[ : len(sym_labels)] + v2_logit[num_label:] + v2_logit[len(sym_labels) : num_label]
 
+                    # average prob and logit from inverse relation prediction
                     for j in range(len(v2_prob)):
-                        v1_prob[j] += v2_prob[j]
-                        v1_logit[j] += v1_logit[j]
+                        v1_prob[j] = (v1_prob[j] + v2_prob[j])/2
+                        v1_logit[j] = (v1_logit[j] + v2_logit[j])/2
                 else:
                     assert ( False )
 
@@ -867,17 +870,17 @@ def evaluate(args, model, tokenizer, prefix="", data_file_path = ""):
                     continue
 
                 pred_label = int(np.argmax(v1_prob))
+                pred_prob = v1_prob[pred_label]
+                pred_logit = v1_logit[pred_label]
                 if pred_label>0:
                     if pred_label >= num_label:
                         pred_label = pred_label - num_label + len(sym_labels)
                         m1, m2 = m2, m1
                         v1_ner_label, v2_ner_label = v2_ner_label, v1_ner_label
 
-                    pred_prob = v1_prob[pred_label]
-                    pred_logit = v1_logit[pred_label]
                     pred_label = label_list[pred_label]
 
-                    sentence_results.append((pred_logit, pred_prob, m1, m2, pred_label, v1_ner_label, v2_ner_label) )
+                    sentence_results.append((pred_logit, pred_prob, m1, m2, pred_label, v1_ner_label, v2_ner_label, v1_rel_repr) )
 
             sentence_results.sort(key=lambda x: -x[1])
             no_overlap = []
@@ -1050,6 +1053,7 @@ def evaluate(args, model, tokenizer, prefix="", data_file_path = ""):
 
     file_path = data_file_path
 
+    embedding_idx = 0; dataset_rel_repr = []
     f_original = open(file_path,'r')
     with open(os.path.join(args.output_dir, prefix+'_predictions.json'), 'w') as output_w:
         for l_idx, line in enumerate(f_original):
@@ -1059,9 +1063,18 @@ def evaluate(args, model, tokenizer, prefix="", data_file_path = ""):
             for i in range(len(data['sentences'])):
                 temp = [item[1] for item in tot_output_results[l_idx] if item[0] == i]
                 temp = temp[0] if temp else temp #if not empty, remove outer list
+                rel_emb_temp = [item[-1] for item in temp] if temp else None #if not empty, extract out the embeddings of each relation
+                temp = [item[:-1] + (embedding_idx+idx,) for idx,item in enumerate(temp)] if temp else temp #if not empty, extract out the embeddings of each relation
+                embedding_idx+= len(temp)
                 rels.append(temp)
+                if temp and save_embeddings:
+                    dataset_rel_repr.extend([emb.detach().cpu() for emb in rel_emb_temp])
             data['relations'] = rels
             output_w.write(json.dumps(data)+'\n')
+    if save_embeddings:
+        dataset_rel_repr = torch.stack(dataset_rel_repr,dim=0) 
+        with open(os.path.join(args.output_dir,'embeddings','pl_marker_' + prefix + '_embeddings'),'wb') as f:
+            torch.save(dataset_rel_repr,f)
 
     if not args.do_predict:        
         ner_p = ner_cor / ner_tot_pred if ner_tot_pred > 0 else 0 
@@ -1117,6 +1130,8 @@ def call_pl_marker_re(importargs=None):
                         help="Whether to run evaluation on the given data file.")
     parser.add_argument('--do_predict', action='store_true',
                         help="Whether to run perdiction on the given data file.")
+    parser.add_argument('--save_embeddings', action='store_true',
+                        help="Whether to save representation embeddings of predicted relations.")
 
     parser.add_argument("--evaluate_during_training", action='store_true',
                         help="Rul evaluation during training at each logging step.")
@@ -1343,14 +1358,14 @@ def call_pl_marker_re(importargs=None):
         model = model_class.from_pretrained(args.model_name_or_path, config=config)
 
         model.to(args.device)
-        results = evaluate(args, model, tokenizer, prefix = args.data_label, data_file_path=args.data_file)
+        results = evaluate(args, model, tokenizer, prefix = args.data_label, data_file_path=args.data_file, save_embeddings = args.save_embeddings)
         print (results)
 
         if args.do_test:
             F1_path = os.path.join(args.output_dir, 'F1_'+str(args.data_label)+'.csv')
             ner_f1 = results['ner_f1']; f1 = results['rel_f1']; f1_with_nec = results['rel_f1_with_ner']
             with open(F1_path, 'w') as csv_file:
-                row1= ['{:<30}'.format('NER_Micro_F1'), '{:<30}'.format('Rel+_Micro_F1'), '{:<30}'.format('Rel_Micro_F1')]
+                row1= ['{:<30}'.format('NER_Micro_F1'), '{:<30}'.format('Rel_Micro_F1'), '{:<30}'.format('Rel+_Micro_F1')]
                 row2 = ['{:<30}'.format(f'{ner_f1*100:.4f}'), '{:<30}'.format(f'{f1*100:.4f}'), '{:<30}'.format(f'{f1_with_nec*100:.4f}')]
                 writer = csv.writer(csv_file, delimiter=CSV_DELIMETER, quotechar='|', quoting=csv.QUOTE_MINIMAL)
                 writer.writerow(row1); writer.writerow(row2)

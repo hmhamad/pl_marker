@@ -1,18 +1,10 @@
 import os
 
 from models.wrapper import ModelWrapper
-from mapping import map_datafile
-
 import os
-import json
 from models.pl_marker.pl_marker_re_main import call_pl_marker_re
 from models.pl_marker.pl_marker_ner_main import call_pl_marker_ner
-from models.spert.args import train_argparser, eval_argparser, predict_argparser, ssl_argparser
-from models.spert.config_reader import process_configs, _yield_configs
-from models.spert.spert import input_reader, trainer
-from models.spert.spert.spert_trainer import SpERTTrainer
-from models.spert.spert_main import predict_for_ssl, train, eval
-import shutil
+from mapping import map_datafile
 
 TRANSLATE_ARGS = {'model_path': 'model_name_or_path', 'train_path': 'train_file', 'valid_path': 'dev_file', 'dataset_path': 'data_file', 'log_path': 'output_dir'}
 
@@ -68,6 +60,7 @@ class PLMarkerWrapper(ModelWrapper):
         return True
 
     def eval(self, model_path, dataset_path, output_path, data_label='test', save_embeddings = False, Temp_rel = 1.0, Temp_ent = 1.0):
+           
         # First evaluate NER model and save NER results
         ner_exportargs = {}
         for key,val in self.exp_cfgs.model_args.configs.items():
@@ -109,16 +102,15 @@ class PLMarkerWrapper(ModelWrapper):
         re_exportargs['do_eval'] = False
         ner_exportargs['do_predict'] = False
         re_exportargs['data_label'] = data_label
-
+        re_exportargs['save_embeddings'] = save_embeddings
 
         call_pl_marker_re(re_exportargs)
 
         map_datafile(
-            in_path=os.path.join(self.exp_cfgs.model_args.log_path,data_label+'_predictions.json'),
-            out_path=os.path.join(self.exp_cfgs.model_args.log_path,data_label+'_predictions.json'),
-            from_format='cluster_jsonl',
-            to_format='standard',
-            predicted=True)
+        in_path=os.path.join(self.exp_cfgs.model_args.log_path,data_label+'_predictions.json'),
+        out_path=os.path.join(self.exp_cfgs.model_args.log_path,data_label+'_predictions_standard.json'),
+        from_format='cluster_jsonl',
+        to_format='standard')
     
     def predict(self, model_path, dataset_path, output_path, data_label='unlabeled', save_embeddings = False, Temp_rel = 1.0, Temp_ent = 1.0):
         # First evaluate NER model and save NER results
@@ -165,14 +157,6 @@ class PLMarkerWrapper(ModelWrapper):
 
 
         call_pl_marker_re(re_exportargs)
-
-        # Change predicted data format to Standard format
-        map_datafile(
-            in_path=os.path.join(self.exp_cfgs.model_args.log_path,data_label+'_predictions.json'),
-            out_path=os.path.join(self.exp_cfgs.model_args.log_path,data_label+'_predictions.json'),
-            from_format='cluster_jsonl',
-            to_format='standard',
-            predicted=True)
 
     def calibrate(self):
         pass
