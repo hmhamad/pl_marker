@@ -112,6 +112,8 @@ class ACEDatasetNER(Dataset):
             self.ner_label_list = ['NIL', 'Method', 'OtherScientificTerm', 'Task', 'Generic', 'Material', 'Metric']
         elif args.data_dir.find('conll04')!=-1:
             self.ner_label_list = ['NIL', 'Loc', 'Org', 'Peop', 'Other']
+        elif args.data_dir.find('fire')!=-1:
+            self.ner_label_list = ['NIL', 'Company', 'FinancialEntity', 'Quantity', 'Date', 'Money', 'Location', 'Action', 'GeopoliticalEntity', 'Product', 'Designation', 'Sector', 'Person', 'BusinessUnit']
         else:
             self.ner_label_list = ['NIL', 'CARDINAL', 'DATE', 'EVENT', 'FAC', 'GPE', 'LANGUAGE', 'LAW', 'LOC', 'MONEY', 'NORP', 'ORDINAL', 'ORG', 'PERCENT', 'PERSON', 'PRODUCT', 'QUANTITY', 'TIME', 'WORK_OF_ART']
 
@@ -894,6 +896,8 @@ def call_pl_marker_ner(importargs=None):
         num_labels = 8
     elif args.data_dir.find('conll04')!=-1:
         num_labels = 5
+    elif args.data_dir.find('fire')!=-1:
+        num_labels = 14
     elif args.data_dir.find('scierc')!=-1:
         num_labels = 7
     elif args.data_dir.find('ontonotes')!=-1:

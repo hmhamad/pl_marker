@@ -74,13 +74,15 @@ task_ner_labels = {
     'ace05': ['FAC', 'WEA', 'LOC', 'VEH', 'GPE', 'ORG', 'PER'],
     'scierc': ['Method', 'OtherScientificTerm', 'Task', 'Generic', 'Material', 'Metric'],
     'conll04': ['Loc', 'Org', 'Peop', 'Other'],
+    'fire': ['Company', 'FinancialEntity', 'Quantity', 'Date', 'Money', 'Location', 'Action', 'GeopoliticalEntity', 'Product', 'Designation', 'Sector', 'Person', 'BusinessUnit']
 }
 
 task_rel_labels = {
     'ace04': ['PER-SOC', 'OTHER-AFF', 'ART', 'GPE-AFF', 'EMP-ORG', 'PHYS'],
     'ace05': ['PER-SOC', 'ART', 'ORG-AFF', 'GEN-AFF', 'PHYS', 'PART-WHOLE'],
     'scierc': ['PART-OF', 'USED-FOR', 'FEATURE-OF', 'CONJUNCTION', 'EVALUATE-FOR', 'HYPONYM-OF', 'COMPARE'],
-    'conll04': ['PART-OF', 'USED-FOR', 'FEATURE-OF',  'EVALUATE-FOR', 'HYPONYM-OF'],
+    'conll04': ['Work_For', 'Kill', 'OrgBased_In',  'Live_In', 'Located_In'],
+    'fire': ['ValueChangeDecreaseby', 'Valuein', 'Value', 'ValueChangeIncreaseby', 'Locatedin', 'ActionSell', 'Quantity', 'ActionBuy', 'Productof', 'Employeeof', 'Sector', 'Subsidiaryof', 'Designation', 'Actionin', 'Propertyof'],
 }
 
 
@@ -154,6 +156,18 @@ class ACEDataset(Dataset):
                 self.label_list = self.sym_labels + label_list
             else:
                 label_list = ['Work_For', 'Kill', 'OrgBased_In', 'Live_In', 'Located_In']
+                self.sym_labels = ['NIL']
+                self.label_list = self.sym_labels + label_list
+        
+        elif args.data_dir.find('fire')!=-1:      
+            self.ner_label_list = ['NIL', 'Company', 'FinancialEntity', 'Quantity', 'Date', 'Money', 'Location', 'Action', 'GeopoliticalEntity', 'Product', 'Designation', 'Sector', 'Person', 'BusinessUnit']
+
+            if args.no_sym:
+                label_list = ['ValueChangeDecreaseby', 'Valuein', 'Value', 'ValueChangeIncreaseby', 'Locatedin', 'ActionSell', 'Quantity', 'ActionBuy', 'Productof', 'Employeeof', 'Sector', 'Subsidiaryof', 'Designation', 'Actionin', 'Propertyof']
+                self.sym_labels = ['NIL']
+                self.label_list = self.sym_labels + label_list
+            else:
+                label_list = ['ValueChangeDecreaseby', 'Valuein', 'Value', 'ValueChangeIncreaseby', 'Locatedin', 'ActionSell', 'Quantity', 'ActionBuy', 'Productof', 'Employeeof', 'Sector', 'Subsidiaryof', 'Designation', 'Actionin', 'Propertyof']
                 self.sym_labels = ['NIL']
                 self.label_list = self.sym_labels + label_list
         else:
@@ -1270,6 +1284,14 @@ def call_pl_marker_re(importargs=None):
             num_labels = 6 + 6 - 1
         else:
             num_labels = 6 + 6 - 1
+    
+    elif args.data_dir.find('fire')!=-1:
+        num_ner_labels = 14
+
+        if args.no_sym:
+            num_labels = 16 + 16 - 1
+        else:
+            num_labels = 16 + 16 - 1
     else:
         assert (False)
 
