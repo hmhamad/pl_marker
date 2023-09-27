@@ -458,8 +458,12 @@ def train(args, model, tokenizer):
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
 
     train_dataset = ACEDatasetNER(tokenizer=tokenizer, args=args)
-                            
-    train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+    
+    if args.curriculum_learning:
+        train_sampler = SequentialSampler(train_dataset) # for curriculum learning
+    else:
+        train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+    
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, num_workers=2*int(args.output_dir.find('test')==-1))
 
     t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
@@ -789,7 +793,9 @@ def call_pl_marker_ner(importargs=None):
                         help="Whether to run prediction on the given data file.")
     parser.add_argument("--data_label", default="", type=str,
                         help="Label to give predictions and test results files")
-
+    parser.add_argument('--curriculum_learning', action='store_true',
+                        help="Whether to run sequential or random train sampler.")
+    
     parser.add_argument("--evaluate_during_training", action='store_true',
                         help="Rul evaluation during training at each logging step.")
     parser.add_argument("--do_lower_case", action='store_true',

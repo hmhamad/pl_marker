@@ -55,6 +55,7 @@ import numpy as np
 import unicodedata
 import itertools
 import timeit
+import optuna
 
 from tqdm import tqdm
 
@@ -581,13 +582,16 @@ def _rotate_checkpoints(args, checkpoint_prefix, use_mtime=False):
         logger.info("Deleting older checkpoint [{}] due to args.save_total_limit".format(checkpoint))
         shutil.rmtree(checkpoint)
 
-def train(args, model, tokenizer):
+def train(args, model, tokenizer, trial = None):
     """ Train the model """
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
 
     train_dataset = ACEDataset(tokenizer=tokenizer, args=args, max_pair_length=args.max_pair_length)
 
-    train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+    if args.curriculum_learning:
+        train_sampler = SequentialSampler(train_dataset) # for curriculum learning
+    else:
+        train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, num_workers=4*int(args.output_dir.find('test')==-1))
 
     if args.max_steps > 0:
@@ -741,6 +745,10 @@ def train(args, model, tokenizer):
             if ner_f1 > best_ner_f1:
                 best_ner_f1 = ner_f1
 
+            if trial:
+                trial.report(f1_with_ner, epoch)
+                if trial.should_prune():
+                    raise optuna.exceptions.TrialPruned()
 
         with open(os.path.join(args.output_dir,'F1_epochs.csv'),'a') as csv_file:
             row = ['{:<10}'.format(f'{epoch+1}/'+str(int(args.num_train_epochs))),'{:<30}'.format(f'{ner_f1*100:.4f}'), '{:<30}'.format(f'{best_ner_f1*100:.4f}'), '{:<30}'.format(f'{f1*100:.4f}'), '{:<30}'.format(f'{best_f1*100:.4f}'), '{:<30}'.format(f'{f1_with_ner*100:.4f}'), '{:<30}'.format(f'{best_f1_with_ner*100:.4f}')]
@@ -1112,7 +1120,7 @@ def evaluate(args, model, tokenizer, prefix="", data_file_path = "", save_embedd
 
 
 
-def call_pl_marker_re(importargs=None):
+def call_pl_marker_re(importargs=None, trial = None):
     parser = argparse.ArgumentParser()
 
     ## Required parameters
@@ -1146,7 +1154,9 @@ def call_pl_marker_re(importargs=None):
                         help="Whether to run perdiction on the given data file.")
     parser.add_argument('--save_embeddings', action='store_true',
                         help="Whether to save representation embeddings of predicted relations.")
-
+    parser.add_argument('--curriculum_learning', action='store_true',
+                        help="Whether to run sequential or random train sampler.")
+    
     parser.add_argument("--evaluate_during_training", action='store_true',
                         help="Rul evaluation during training at each logging step.")
     parser.add_argument("--do_lower_case", action='store_true',
@@ -1368,7 +1378,7 @@ def call_pl_marker_re(importargs=None):
     # Training
     if args.do_train:
         # train_dataset = load_and_cache_examples(args,  tokenizer, evaluate=False)
-        global_step, tr_loss, best_f1 = train(args, model, tokenizer)
+        global_step, tr_loss, best_f1 = train(args, model, tokenizer, trial)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
     # Evaluation
@@ -1392,6 +1402,7 @@ def call_pl_marker_re(importargs=None):
                 writer = csv.writer(csv_file, delimiter=CSV_DELIMETER, quotechar='|', quoting=csv.QUOTE_MINIMAL)
                 writer.writerow(row1); writer.writerow(row2)
 
+    return best_f1 if args.do_train else results
 if __name__ == "__main__":
     call_pl_marker_re()
 
