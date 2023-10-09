@@ -83,7 +83,7 @@ task_rel_labels = {
     'ace05': ['PER-SOC', 'ART', 'ORG-AFF', 'GEN-AFF', 'PHYS', 'PART-WHOLE'],
     'scierc': ['PART-OF', 'USED-FOR', 'FEATURE-OF', 'CONJUNCTION', 'EVALUATE-FOR', 'HYPONYM-OF', 'COMPARE'],
     'conll04': ['Work_For', 'Kill', 'OrgBased_In',  'Live_In', 'Located_In'],
-    'fire': ['ValueChangeDecreaseby', 'Valuein', 'Value', 'ValueChangeIncreaseby', 'Locatedin', 'ActionSell', 'Quantity', 'ActionBuy', 'Productof', 'Employeeof', 'Sector', 'Subsidiaryof', 'Designation', 'Actionin', 'Propertyof'],
+    'fire': ['ValueChangeDecreaseby', 'Valuein', 'Value', 'ValueChangeIncreaseby', 'Locatedin', 'ActionSell', 'Actionto', 'ActionBuy', 'Quantity', 'ActionMerge', 'Productof', 'Employeeof', 'Sector', 'Subsidiaryof', 'Designation', 'Actionin', 'Constituentof', 'Propertyof'],
 }
 
 
@@ -164,11 +164,11 @@ class ACEDataset(Dataset):
             self.ner_label_list = ['NIL', 'Company', 'FinancialEntity', 'Quantity', 'Date', 'Money', 'Location', 'Action', 'GeopoliticalEntity', 'Product', 'Designation', 'Sector', 'Person', 'BusinessUnit']
 
             if args.no_sym:
-                label_list = ['ValueChangeDecreaseby', 'Valuein', 'Value', 'ValueChangeIncreaseby', 'Locatedin', 'ActionSell', 'Quantity', 'ActionBuy', 'Productof', 'Employeeof', 'Sector', 'Subsidiaryof', 'Designation', 'Actionin', 'Propertyof']
+                label_list = ['ValueChangeDecreaseby', 'Valuein', 'Value', 'ValueChangeIncreaseby', 'Locatedin', 'ActionSell', 'Actionto', 'ActionBuy', 'Quantity', 'ActionMerge', 'Productof', 'Employeeof', 'Sector', 'Subsidiaryof', 'Designation', 'Actionin', 'Constituentof', 'Propertyof']
                 self.sym_labels = ['NIL']
                 self.label_list = self.sym_labels + label_list
             else:
-                label_list = ['ValueChangeDecreaseby', 'Valuein', 'Value', 'ValueChangeIncreaseby', 'Locatedin', 'ActionSell', 'Quantity', 'ActionBuy', 'Productof', 'Employeeof', 'Sector', 'Subsidiaryof', 'Designation', 'Actionin', 'Propertyof']
+                label_list = ['ValueChangeDecreaseby', 'Valuein', 'Value', 'ValueChangeIncreaseby', 'Locatedin', 'ActionSell', 'Actionto', 'ActionBuy', 'Quantity', 'ActionMerge', 'Productof', 'Employeeof', 'Sector', 'Subsidiaryof', 'Designation', 'Actionin', 'Constituentof', 'Propertyof']
                 self.sym_labels = ['NIL']
                 self.label_list = self.sym_labels + label_list
         else:
@@ -1299,9 +1299,9 @@ def call_pl_marker_re(importargs=None, trial = None):
         num_ner_labels = 14
 
         if args.no_sym:
-            num_labels = 16 + 16 - 1
+            num_labels = 19 + 19 - 1
         else:
-            num_labels = 16 + 16 - 1
+            num_labels = 19 + 19 - 1
     else:
         assert (False)
 

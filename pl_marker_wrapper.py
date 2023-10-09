@@ -12,18 +12,16 @@ class PLMarkerWrapper(ModelWrapper):
     def __init__(self, exp_cfgs) -> None:
         super().__init__(exp_cfgs)
 
-    def train(self, model_path, train_path, valid_path, output_path, trial=None):
+    def train(self, model_path, train_path, valid_path, output_path, trial=None, curriculum_learning = False, ner_train_path = None):
         
-        if trial:
+        if trial and not curriculum_learning:
             self.exp_cfgs.model_args.re_params.edit('num_train_epochs',trial.suggest_int('re_train_epochs', 5, 20))
             self.exp_cfgs.model_args.re_params.edit('learning_rate',trial.suggest_float('re_lr', 1e-7, 1e-4))
             self.exp_cfgs.model_args.re_params.edit('weight_decay',trial.suggest_float('re_weight_decay', 0.0, 0.1))
-            self.exp_cfgs.model_args.re_params.edit('max_seq_length',trial.suggest_int('max_seq_length', 128, 256))
             
             self.exp_cfgs.model_args.ner_params.edit('num_train_epochs',trial.suggest_int('ner_train_epochs', 5, 30))
             self.exp_cfgs.model_args.ner_params.edit('learning_rate',trial.suggest_float('ner_lr', 1e-7, 1e-4))
             self.exp_cfgs.model_args.re_params.edit('weight_decay',trial.suggest_float('ner_weight_decay', 0.0, 0.1))
-            self.exp_cfgs.model_args.ner_params.edit('max_mention_ori_length',trial.suggest_int('max_mention_ori_length', 8, 32))
         
         # First Train NER model and save NER results
         ner_exportargs = {}
@@ -36,7 +34,7 @@ class PLMarkerWrapper(ModelWrapper):
         
         ner_model_path = os.path.join(model_path,'ner_model') if 'best_model' in model_path else model_path
         ner_exportargs[TRANSLATE_ARGS['model_path']] = ner_model_path
-        ner_exportargs[TRANSLATE_ARGS['train_path']] = train_path
+        ner_exportargs[TRANSLATE_ARGS['train_path']] = train_path if not ner_train_path else ner_train_path
         ner_exportargs[TRANSLATE_ARGS['valid_path']] = valid_path
         ner_exportargs[TRANSLATE_ARGS['log_path']] = output_path
         ner_exportargs['do_train'] = True
