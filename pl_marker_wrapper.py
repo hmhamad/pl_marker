@@ -15,12 +15,13 @@ class PLMarkerWrapper(ModelWrapper):
     def train(self, model_path, train_path, valid_path, output_path, trial=None, curriculum_learning = False, train_ner = True, ner_train_path = None):
         
         if trial and not curriculum_learning:
+            lr_range = [i*1e-6 for i in range(1, 10)] + [i*1e-5 for i in range(1, 10)]
             self.exp_cfgs.model_args.re_params.edit('num_train_epochs',trial.suggest_int('re_train_epochs', 5, 20, step=5))
-            self.exp_cfgs.model_args.re_params.edit('learning_rate',trial.suggest_categorical('re_lr', [5e-6, 7e-6, 1e-5, 3e-5, 5e-5, 7e-5]))
+            self.exp_cfgs.model_args.re_params.edit('learning_rate',trial.suggest_categorical('re_lr', lr_range))
             self.exp_cfgs.model_args.re_params.edit('weight_decay',trial.suggest_float('re_weight_decay', 0.0, 0.1))
             
             self.exp_cfgs.model_args.ner_params.edit('num_train_epochs',trial.suggest_int('ner_train_epochs', 5, 30, step=5))
-            self.exp_cfgs.model_args.ner_params.edit('learning_rate',trial.suggest_categorical('ner_lr', [5e-6, 7e-6, 1e-5, 3e-5, 5e-5, 7e-5]))
+            self.exp_cfgs.model_args.ner_params.edit('learning_rate',trial.suggest_categorical('ner_lr', lr_range))
         
         if train_ner:
             # First Train NER model and save NER results
@@ -75,7 +76,7 @@ class PLMarkerWrapper(ModelWrapper):
         else:
             return eval_micro_f1
 
-    def eval(self, model_path, dataset_path, output_path, data_label='test', save_embeddings = False, Temp_rel = 1.0, Temp_ent = 1.0):
+    def eval(self, model_path, dataset_path, output_path, data_label='test', save_embeddings = False, Temp_rel = 1.0, Temp_ent = 1.0, ner_model_path = None):
            
         # First evaluate NER model and save NER results
         ner_exportargs = {}
@@ -86,7 +87,9 @@ class PLMarkerWrapper(ModelWrapper):
         for key,val in self.exp_cfgs.model_args.ner_params.configs.items():
             ner_exportargs[key] = val
 
-        ner_model_path = os.path.join(model_path,'ner_model') if 'best_model' in model_path else model_path
+        if ner_model_path is None:
+            ner_model_path = os.path.join(model_path,'ner_model') if 'best_model' in model_path else model_path
+            
         ner_exportargs[TRANSLATE_ARGS['model_path']] = ner_model_path
         ner_exportargs[TRANSLATE_ARGS['dataset_path']] = dataset_path
         ner_exportargs[TRANSLATE_ARGS['log_path']] = output_path

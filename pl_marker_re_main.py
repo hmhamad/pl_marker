@@ -747,8 +747,8 @@ def train(args, model, tokenizer, trial = None):
 
             if trial:
                 trial.report(f1_with_ner, epoch)
-                if trial.should_prune():
-                    raise optuna.exceptions.TrialPruned()
+                # if trial.should_prune():
+                #     raise optuna.exceptions.TrialPruned()
 
         with open(os.path.join(args.output_dir,'F1_epochs.csv'),'a') as csv_file:
             row = ['{:<10}'.format(f'{epoch+1}/'+str(int(args.num_train_epochs))),'{:<30}'.format(f'{ner_f1*100:.4f}'), '{:<30}'.format(f'{best_ner_f1*100:.4f}'), '{:<30}'.format(f'{f1*100:.4f}'), '{:<30}'.format(f'{best_f1*100:.4f}'), '{:<30}'.format(f'{f1_with_ner*100:.4f}'), '{:<30}'.format(f'{best_f1_with_ner*100:.4f}')]
