@@ -16,12 +16,13 @@ class PLMarkerWrapper(ModelWrapper):
         
         if trial and not curriculum_learning:
             lr_range = [i*1e-6 for i in range(1, 10)] + [i*1e-5 for i in range(1, 10)]
-            self.exp_cfgs.model_args.re_params.edit('num_train_epochs',trial.suggest_int('re_train_epochs', 5, 20, step=5))
-            self.exp_cfgs.model_args.re_params.edit('learning_rate',trial.suggest_categorical('re_lr', lr_range))
-            self.exp_cfgs.model_args.re_params.edit('weight_decay',trial.suggest_float('re_weight_decay', 0.0, 0.1))
+            batch_size = trial.suggest_categorical('batch_size', [2,4,8])
             
-            self.exp_cfgs.model_args.ner_params.edit('num_train_epochs',trial.suggest_int('ner_train_epochs', 5, 30, step=5))
+            self.exp_cfgs.model_args.re_params.edit('learning_rate',trial.suggest_categorical('re_lr', lr_range))
+            self.exp_cfgs.model_args.re_params.edit('per_gpu_train_batch_size',batch_size)
+            
             self.exp_cfgs.model_args.ner_params.edit('learning_rate',trial.suggest_categorical('ner_lr', lr_range))
+            self.exp_cfgs.model_args.ner_params.edit('per_gpu_train_batch_size',batch_size)
         
         if train_ner:
             # First Train NER model and save NER results
